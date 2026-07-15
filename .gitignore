@@ -1,0 +1,5 @@
+/target
+/db
+/contracts/node_modules
+/contracts/out
+genesis.json

@@ -1,9 +1,19 @@
-[package]
-name = "sovereign-reth"
+[workspace]
+members = [
+    "crates/node",
+    "crates/consensus",
+    "crates/attestation",
+    "crates/identity",
+    "crates/network",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+authors = ["Citrullin"]
 
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1.37", features = ["full"] }
 eyre = "0.6"
 clap = { version = "4.5", features = ["derive"] }
@@ -11,8 +21,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+alloy-primitives = { version = "=1.6.0", features = ["serde"] }
 
-# Reth library dependencies pinned to v2.4.0
+# Reth dependencies
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
@@ -20,7 +32,7 @@ reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0", f
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-db = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0", features = ["test-utils"] }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-exex = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-stages = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
@@ -28,6 +40,14 @@ reth-primitives-traits = "0.5.0"
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-node-core = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-futures = "0.3"
-alloy-primitives = { version = "=1.6.0", features = ["serde"] }
+
+# Local Workspace dependencies
+sovereign-consensus = { path = "crates/consensus" }
+sovereign-attestation = { path = "crates/attestation" }
+sovereign-identity = { path = "crates/identity" }
+sovereign-network = { path = "crates/network" }
+
+[profile.dev]
+debug = 0
+strip = true
 

@@ -5,3 +5,5 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+dcap-qvl = { workspace = true }
+

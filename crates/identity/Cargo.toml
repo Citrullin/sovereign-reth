@@ -6,3 +6,10 @@ authors.workspace = true
 
 [dependencies]
 alloy-primitives = { workspace = true }
+did-peer = { workspace = true }
+siwe = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true }
+
+

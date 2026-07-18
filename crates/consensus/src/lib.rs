@@ -6,5 +6,8 @@
 #![allow(clippy::must_use_candidate, clippy::module_name_repetitions)]
 
 pub mod pool;
+pub mod stateless;
+pub mod nmt;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};
+

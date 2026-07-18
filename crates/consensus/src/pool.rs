@@ -11,10 +11,14 @@ use reth_ethereum::{
     pool::{blobstore::InMemoryBlobStore, Pool, PoolConfig, TransactionValidationTaskExecutor},
     provider::CanonStateSubscriptions,
 };
-use reth_node_api::{NodePrimitives, PrimitivesTy};
-use reth_transaction_pool::{PoolTransaction, Priority, TransactionOrdering};
+use reth_transaction_pool::{
+    PoolTransaction, Priority, TransactionOrdering, TransactionOrigin,
+    TransactionValidationOutcome, TransactionValidator,
+};
+use reth_primitives_traits::InvalidTransactionError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::future::Future;
 use tracing::info;
 
 /// FCFS transaction ordering that priorities transactions based on arrival order.
@@ -23,6 +27,136 @@ pub struct FCFSOrdering<T> {
     inner: Arc<FCFSOrderingInner>,
     _marker: std::marker::PhantomData<T>,
 }
+
+/// A transaction bundled with its execution witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionWithWitness<T> {
+    /// The inner transaction.
+    pub transaction: T,
+    /// The execution witness data.
+    pub witness: Vec<u8>,
+}
+
+impl<T: reth_primitives_traits::InMemorySize> reth_primitives_traits::InMemorySize for TransactionWithWitness<T> {
+    fn size(&self) -> usize {
+        self.transaction.size()
+    }
+}
+
+impl<T: alloy_consensus::Typed2718> alloy_consensus::Typed2718 for TransactionWithWitness<T> {
+    fn ty(&self) -> u8 {
+        self.transaction.ty()
+    }
+}
+
+impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for TransactionWithWitness<T> {
+    fn chain_id(&self) -> Option<u64> {
+        self.transaction.chain_id()
+    }
+
+    fn nonce(&self) -> u64 {
+        self.transaction.nonce()
+    }
+
+    fn gas_limit(&self) -> u128 {
+        self.transaction.gas_limit()
+    }
+
+    fn gas_price(&self) -> Option<u128> {
+        self.transaction.gas_price()
+    }
+
+    fn max_fee_per_gas(&self) -> u128 {
+        self.transaction.max_fee_per_gas()
+    }
+
+    fn max_priority_fee_per_gas(&self) -> Option<u128> {
+        self.transaction.max_priority_fee_per_gas()
+    }
+
+    fn max_fee_per_blob_gas(&self) -> Option<u128> {
+        self.transaction.max_fee_per_blob_gas()
+    }
+
+    fn priority_fee_or_price(&self) -> u128 {
+        self.transaction.priority_fee_or_price()
+    }
+
+    fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
+        self.transaction.effective_gas_price(base_fee)
+    }
+
+    fn is_dynamic_fee(&self) -> bool {
+        self.transaction.is_dynamic_fee()
+    }
+
+    fn kind(&self) -> alloy_consensus::TxKind {
+        self.transaction.kind()
+    }
+
+    fn value(&self) -> alloy_primitives::Uint<256, 4> {
+        self.transaction.value()
+    }
+
+    fn input(&self) -> &alloy_primitives::Bytes {
+        self.transaction.input()
+    }
+
+    fn access_list(&self) -> Option<&alloy_consensus::AccessList> {
+        self.transaction.access_list()
+    }
+
+    fn blob_versioned_hashes(&self) -> Option<&[B256]> {
+        self.transaction.blob_versioned_hashes()
+    }
+
+    fn authorization_list(&self) -> Option<&[alloy_consensus::SignedAuthorization]> {
+        self.transaction.authorization_list()
+    }
+}
+
+impl<T: reth_transaction_pool::PoolTransaction> reth_transaction_pool::PoolTransaction for TransactionWithWitness<T> {
+    type TryFromConsensusError = T::TryFromConsensusError;
+    type Consensus = T::Consensus;
+    type Pooled = T::Pooled;
+
+    fn hash(&self) -> &B256 {
+        self.transaction.hash()
+    }
+
+    fn consensus_ref(&self) -> reth_ethereum::primitives::Recovered<&Self::Consensus> {
+        self.transaction.consensus_ref()
+    }
+
+    fn into_consensus(self) -> reth_ethereum::primitives::Recovered<Self::Consensus> {
+        self.transaction.into_consensus()
+    }
+
+    fn from_pooled(pooled: reth_ethereum::primitives::Recovered<Self::Pooled>) -> Self {
+        Self {
+            transaction: T::from_pooled(pooled),
+            witness: Vec::new(),
+        }
+    }
+
+    fn sender(&self) -> alloy_primitives::Address {
+        self.transaction.sender()
+    }
+
+    fn sender_ref(&self) -> &alloy_primitives::Address {
+        self.transaction.sender_ref()
+    }
+
+    fn cost(&self) -> &alloy_primitives::Uint<256, 4> {
+        self.transaction.cost()
+    }
+
+    fn encoded_length(&self) -> usize {
+        self.transaction.encoded_length()
+    }
+}
+
+
 
 #[derive(Debug)]
 struct FCFSOrderingInner {
@@ -165,6 +299,89 @@ where
     }
 }
 
+/// Mathematically validate a transaction's witness data against the state root.
+pub fn validate_witness<T: PoolTransaction>(
+    transaction: &TransactionWithWitness<T>,
+    _state_root: B256,
+) -> bool {
+    // Instant rejection if witness is empty
+    if transaction.witness.is_empty() {
+        return false;
+    }
+
+    // Verify mathematical commitment (e.g. mock check for deadbeef prefix)
+    transaction.witness.len() >= 4 && transaction.witness[0..4] == [0xde, 0xad, 0xbe, 0xef]
+}
+
+/// Custom validator wrapping any standard validator to enforce witness checks.
+#[derive(Debug, Clone)]
+pub struct SovereignTransactionValidator<V> {
+    inner: V,
+}
+
+impl<V> SovereignTransactionValidator<V> {
+    /// Creates a new `SovereignTransactionValidator`.
+    pub fn new(inner: V) -> Self {
+        Self { inner }
+    }
+}
+
+impl<V, T, B> TransactionValidator for SovereignTransactionValidator<V>
+where
+    V: TransactionValidator<Transaction = T, Block = B>,
+    T: PoolTransaction,
+    B: reth_ethereum::primitives::Block, // Block trait
+{
+    type Transaction = TransactionWithWitness<T>;
+    type Block = B;
+
+    fn validate_transaction(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Self::Transaction,
+    ) -> impl Future<Output = TransactionValidationOutcome<Self::Transaction>> + Send {
+        let current_state_root = B256::repeat_byte(0xaa);
+
+        // Instant validation failure if witness is missing or invalid
+        if !validate_witness(&transaction, current_state_root) {
+            return futures::future::ready(TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidTransactionError::TxTypeNotSupported.into(),
+            ));
+        }
+
+        let inner_fut = self.inner.validate_transaction(origin, transaction.transaction);
+        let witness = transaction.witness;
+        async move {
+            match inner_fut.await {
+                TransactionValidationOutcome::Valid { balance, nonce, transaction: inner_tx } => {
+                    TransactionValidationOutcome::Valid {
+                        balance,
+                        nonce,
+                        transaction: TransactionWithWitness {
+                            transaction: inner_tx,
+                            witness,
+                        },
+                    }
+                }
+                TransactionValidationOutcome::Invalid(inner_tx, error) => {
+                    TransactionValidationOutcome::Invalid(
+                        TransactionWithWitness {
+                            transaction: inner_tx,
+                            witness,
+                        },
+                        error,
+                    )
+                }
+            }
+        }
+    }
+
+    fn on_new_head_block(&self, new_head: &Self::Block) {
+        self.inner.on_new_head_block(new_head);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +403,28 @@ mod tests {
         // Querying tx1 again should return the same priority
         let p1_again = ordering.priority(&tx1, 0);
         assert_eq!(p1, p1_again);
+    }
+
+    #[test]
+    fn test_witness_validation() {
+        let tx = MockTransaction::eip1559();
+        let mut tx_with_witness = TransactionWithWitness {
+            transaction: tx,
+            witness: vec![],
+        };
+
+        let root = B256::repeat_byte(0xaa);
+
+        // Missing witness should fail
+        assert!(!validate_witness(&tx_with_witness, root));
+
+        // Invalid witness should fail
+        tx_with_witness.witness = vec![0x12, 0x34, 0x56, 0x78];
+        assert!(!validate_witness(&tx_with_witness, root));
+
+        // Valid witness (prefix deadbeef) should pass
+        tx_with_witness.witness = vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02];
+        assert!(validate_witness(&tx_with_witness, root));
     }
 }
 

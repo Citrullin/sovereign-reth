@@ -19,6 +19,43 @@ use std::future::Future;
 use tracing::{debug, info};
 
 use sovereign_consensus::SovereignPoolBuilder;
+use clap::Parser;
+
+/// Custom CLI arguments for the Sovereign Reth node.
+#[derive(Debug, Clone, clap::Args)]
+pub struct SovereignArgs {
+    /// Type of the node (replica or validator)
+    #[arg(long, default_value = "replica")]
+    pub node_type: String,
+
+    /// TEE execution mode (sgx, nitro, or none)
+    #[arg(long, default_value = "none")]
+    pub tee: String,
+
+    /// Operator's did:peer:4 identity string
+    #[arg(long)]
+    pub did_peer4: Option<String>,
+
+    /// Path to operator delegation signature/proof file
+    #[arg(long)]
+    pub delegation_proof: Option<std::path::PathBuf>,
+
+    /// TinyMeritRank reputation threshold for admission
+    #[arg(long, default_value_t = 0.0)]
+    pub merit_threshold: f64,
+}
+
+impl Default for SovereignArgs {
+    fn default() -> Self {
+        Self {
+            node_type: "replica".to_string(),
+            tee: "none".to_string(),
+            did_peer4: None,
+            delegation_proof: None,
+            merit_threshold: 0.0,
+        }
+    }
+}
 
 /// Helper to determine the TEE attestation action based on mode.
 fn get_tee_attestation_action(tee_mode: &str, ephemeral_key: &str, block_number: u64) -> String {
@@ -32,10 +69,9 @@ fn get_tee_attestation_action(tee_mode: &str, ephemeral_key: &str, block_number:
 /// Execution Extension (`ExEx`) for Pluggable TEE Proving & DA Mesh Emission
 async fn sovereign_exex<N: FullNodeComponents>(
     mut ctx: ExExContext<N>,
+    args: SovereignArgs,
 ) -> eyre::Result<impl Future<Output = eyre::Result<()>>> {
-    let tee_mode = env::var("TEE_MODE")
-        .unwrap_or_else(|_| "none".to_string())
-        .to_lowercase();
+    let tee_mode = args.tee.to_lowercase();
 
     Ok(async move {
         info!("Sovereign Pluggable TEE ExEx started! Mode: {}", tee_mode);
@@ -103,9 +139,8 @@ fn main() {
         .with_bal_parallel_execution_disabled(false)
         .try_init();
 
-    if let Err(err) = Cli::parse_args().run(async move |builder, _| {
-        let tee_mode = env::var("TEE_MODE").unwrap_or_else(|_| "none".to_string());
-        info!("Launching Sovereign Reth Node (TEE Mode: {})", tee_mode);
+    if let Err(err) = Cli::<reth_node_ethereum::chainspec::EthereumChainSpecParser, SovereignArgs>::parse().run(async move |builder, args| {
+        info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.node_type, args.tee);
 
         let handle = builder
             .with_types::<EthereumNode>()
@@ -115,7 +150,7 @@ fn main() {
                     .consensus(NoopConsensusBuilder),
             )
             .with_add_ons(EthereumAddOns::default())
-            .install_exex("sovereign_exex", sovereign_exex)
+            .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
             .launch()
             .await?;
 

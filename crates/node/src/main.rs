@@ -7,7 +7,7 @@
 
 use futures::StreamExt;
 use reth_ethereum::{
-    cli::interface::Cli,
+    cli::{chainspec::EthereumChainSpecParser, interface::Cli},
     node::{api::FullNodeComponents, node::EthereumAddOns, EthereumNode},
 };
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
@@ -139,7 +139,7 @@ fn main() {
         .with_bal_parallel_execution_disabled(false)
         .try_init();
 
-    if let Err(err) = Cli::<reth_node_ethereum::chainspec::EthereumChainSpecParser, SovereignArgs>::parse().run(async move |builder, args| {
+    if let Err(err) = Cli::<EthereumChainSpecParser, SovereignArgs>::parse().run(async move |builder, args| {
         info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.node_type, args.tee);
 
         let handle = builder

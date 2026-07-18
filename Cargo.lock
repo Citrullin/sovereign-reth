@@ -8856,6 +8856,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e33493cf6d996e9242db4f2002caef48ec9aa8c4f3fff3b18aed10ef3942eec7"
 dependencies = [
  "bitvec",
+ "paste",
  "phf 0.13.1",
  "revm-primitives",
  "serde",
@@ -9874,6 +9875,8 @@ version = "0.1.0"
 name = "sovereign-consensus"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "eyre",
  "futures",
@@ -9885,6 +9888,10 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-transaction-pool",
+ "revm-bytecode",
+ "revm-database-interface",
+ "revm-primitives",
+ "revm-state",
  "tokio",
  "tracing",
 ]
@@ -9892,6 +9899,9 @@ dependencies = [
 [[package]]
 name = "sovereign-identity"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+]
 
 [[package]]
 name = "sovereign-network"

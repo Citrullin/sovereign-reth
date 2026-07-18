@@ -23,6 +23,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 alloy-primitives = { version = "=1.6.0", features = ["serde"] }
+alloy-consensus = "2.1.1"
+alloy-eips = "2.1.1"
+revm-primitives = "41.0.0"
+revm-state = "41.0.0"
+revm-bytecode = "41.0.0"
+revm-database-interface = "41.0.0"
 
 # Reth dependencies
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }

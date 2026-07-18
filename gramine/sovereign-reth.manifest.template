@@ -1,0 +1,32 @@
+# Sovereign Reth Gramine Manifest Template
+
+# The executable to run
+libos.entrypoint = "sovereign-node"
+
+# Log level
+loader.log_level = "error"
+
+# Enclave memory size (2GB)
+sgx.enclave_size = "2G"
+
+# Max threads
+sgx.thread_num = 64
+
+# Mounts
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "/lib/x86_64-linux-gnu", uri = "file:/lib/x86_64-linux-gnu" },
+  { path = "/usr/lib/x86_64-linux-gnu", uri = "file:/usr/lib/x86_64-linux-gnu" },
+  { path = "/data", type = "encrypted", uri = "file:data" }
+]
+
+# Trusted files
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:sovereign-node",
+  "file:{{ gramine.runtimedir() }}/",
+]
+
+# Allow network access
+sys.enable_extra_runtime_domain_names_conf = true
+sys.enable_sigterm_injection = true

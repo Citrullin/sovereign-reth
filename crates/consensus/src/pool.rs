@@ -15,10 +15,10 @@ use reth_transaction_pool::{
     PoolTransaction, Priority, TransactionOrdering, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator,
 };
-use reth_primitives_traits::InvalidTransactionError;
+use reth_node_api::{NodePrimitives, PrimitivesTy};
+use reth_primitives_traits::transaction::error::InvalidTransactionError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::future::Future;
 use tracing::info;
 
 /// FCFS transaction ordering that priorities transactions based on arrival order.
@@ -58,8 +58,8 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for Transacti
         self.transaction.nonce()
     }
 
-    fn gas_limit(&self) -> u128 {
-        self.transaction.gas_limit()
+    fn gas_limit(&self) -> u64 {
+        self.transaction.gas_limit() as u64
     }
 
     fn gas_price(&self) -> Option<u128> {
@@ -90,7 +90,11 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for Transacti
         self.transaction.is_dynamic_fee()
     }
 
-    fn kind(&self) -> alloy_consensus::TxKind {
+    fn is_create(&self) -> bool {
+        self.transaction.is_create()
+    }
+
+    fn kind(&self) -> alloy_primitives::TxKind {
         self.transaction.kind()
     }
 
@@ -102,7 +106,7 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for Transacti
         self.transaction.input()
     }
 
-    fn access_list(&self) -> Option<&alloy_consensus::AccessList> {
+    fn access_list(&self) -> Option<&alloy_eips::eip2930::AccessList> {
         self.transaction.access_list()
     }
 
@@ -110,7 +114,7 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for Transacti
         self.transaction.blob_versioned_hashes()
     }
 
-    fn authorization_list(&self) -> Option<&[alloy_consensus::SignedAuthorization]> {
+    fn authorization_list(&self) -> Option<&[alloy_eips::eip7702::SignedAuthorization]> {
         self.transaction.authorization_list()
     }
 }
@@ -335,49 +339,77 @@ where
     type Transaction = TransactionWithWitness<T>;
     type Block = B;
 
-    fn validate_transaction(
+    async fn validate_transaction(
         &self,
         origin: TransactionOrigin,
         transaction: Self::Transaction,
-    ) -> impl Future<Output = TransactionValidationOutcome<Self::Transaction>> + Send {
+    ) -> TransactionValidationOutcome<Self::Transaction> {
         let current_state_root = B256::repeat_byte(0xaa);
 
         // Instant validation failure if witness is missing or invalid
         if !validate_witness(&transaction, current_state_root) {
-            return futures::future::ready(TransactionValidationOutcome::Invalid(
+            return TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidTransactionError::TxTypeNotSupported.into(),
-            ));
+            );
         }
 
-        let inner_fut = self.inner.validate_transaction(origin, transaction.transaction);
+        let inner_outcome = self.inner.validate_transaction(origin, transaction.transaction).await;
         let witness = transaction.witness;
-        async move {
-            match inner_fut.await {
-                TransactionValidationOutcome::Valid { balance, nonce, transaction: inner_tx } => {
-                    TransactionValidationOutcome::Valid {
-                        balance,
-                        nonce,
-                        transaction: TransactionWithWitness {
-                            transaction: inner_tx,
-                            witness,
-                        },
+
+        match inner_outcome {
+            TransactionValidationOutcome::Valid {
+                balance,
+                state_nonce,
+                bytecode_hash,
+                propagate,
+                authorities,
+                transaction: inner_tx,
+            } => {
+                let mapped_tx = match inner_tx {
+                    reth_transaction_pool::validate::ValidTransaction::Valid(tx) => {
+                        reth_transaction_pool::validate::ValidTransaction::Valid(
+                            TransactionWithWitness {
+                                transaction: tx,
+                                witness: witness.clone(),
+                            }
+                        )
                     }
+                    reth_transaction_pool::validate::ValidTransaction::ValidWithSidecar { transaction, sidecar } => {
+                        reth_transaction_pool::validate::ValidTransaction::ValidWithSidecar {
+                            transaction: TransactionWithWitness {
+                                transaction,
+                                witness: witness.clone(),
+                            },
+                            sidecar,
+                        }
+                    }
+                };
+                TransactionValidationOutcome::Valid {
+                    balance,
+                    state_nonce,
+                    bytecode_hash,
+                    propagate,
+                    authorities,
+                    transaction: mapped_tx,
                 }
-                TransactionValidationOutcome::Invalid(inner_tx, error) => {
-                    TransactionValidationOutcome::Invalid(
-                        TransactionWithWitness {
-                            transaction: inner_tx,
-                            witness,
-                        },
-                        error,
-                    )
-                }
+            }
+            TransactionValidationOutcome::Invalid(inner_tx, error) => {
+                TransactionValidationOutcome::Invalid(
+                    TransactionWithWitness {
+                        transaction: inner_tx,
+                        witness,
+                    },
+                    error,
+                )
+            }
+            TransactionValidationOutcome::Error(tx_hash, error) => {
+                TransactionValidationOutcome::Error(tx_hash, error)
             }
         }
     }
 
-    fn on_new_head_block(&self, new_head: &Self::Block) {
+    fn on_new_head_block(&self, new_head: &reth_primitives_traits::SealedBlock<Self::Block>) {
         self.inner.on_new_head_block(new_head);
     }
 }

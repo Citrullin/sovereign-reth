@@ -1,7 +1,10 @@
 //! WitnessDatabase and implicit state block validation logic.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use alloy_primitives::{Address, B256, U256};
+use revm_state::AccountInfo;
+use revm_bytecode::Bytecode;
 use revm_database_interface::Database;
 
 /// A stateless database that satisfies storage reads entirely using a pre-populated witness cache.
@@ -27,23 +30,24 @@ pub struct AccountWitness {
 }
 
 impl Database for WitnessDatabase {
-    type Error = eyre::Report;
+    type Error = Infallible;
 
-    fn basic(&mut self, address: Address) -> Result<Option<revm_database_interface::AccountInfo>, Self::Error> {
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         if let Some(acc) = self.accounts.get(&address) {
-            Ok(Some(revm_database_interface::AccountInfo {
+            Ok(Some(AccountInfo {
                 balance: acc.balance,
                 nonce: acc.nonce,
                 code_hash: acc.code_hash,
-                code: Some(revm_primitives::Bytecode::new_raw(acc.code.clone().into())),
+                code: Some(Bytecode::new_raw(acc.code.clone().into())),
+                account_id: Default::default(),
             }))
         } else {
             Ok(None)
         }
     }
 
-    fn code_by_hash(&mut self, _code_hash: B256) -> Result<revm_primitives::Bytecode, Self::Error> {
-        Ok(revm_primitives::Bytecode::default())
+    fn code_by_hash(&mut self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
+        Ok(Bytecode::default())
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {

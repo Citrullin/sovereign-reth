@@ -10,6 +10,12 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+revm-primitives = { workspace = true }
+revm-state = { workspace = true }
+revm-bytecode = { workspace = true }
+revm-database-interface = { workspace = true }
 
 reth-node-api = { workspace = true }
 reth-node-builder = { workspace = true }

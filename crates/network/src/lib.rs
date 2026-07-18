@@ -1,1 +1,10 @@
-//! Sovereign Network Crate
+//! Physical Layer & Peering Module
+//! Handles WireGuard interfaces, single-key derivation, and cross-manifold gossip.
+
+#![warn(missing_docs)]
+#![warn(clippy::all, clippy::pedantic)]
+
+pub mod handshake;
+pub mod wireguard;
+pub mod bgp_gossip;
+pub mod das;

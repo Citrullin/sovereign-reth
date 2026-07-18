@@ -5,3 +5,4 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+alloy-primitives = { workspace = true }

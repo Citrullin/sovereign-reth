@@ -8,6 +8,10 @@
 pub mod pool;
 pub mod stateless;
 pub mod nmt;
+pub mod registry;
+pub mod bgp;
+pub mod precompile;
+pub mod slashing;
+pub mod parallel;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};
-

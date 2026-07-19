@@ -26,4 +26,6 @@ reth-transaction-pool = { workspace = true }
 reth-primitives-traits = { workspace = true }
 reth-chainspec = { workspace = true }
 nmt-rs = { workspace = true }
+boringtun = { workspace = true }
+
 

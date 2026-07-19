@@ -18,6 +18,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 alloy-primitives = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+
+
+tiny-keccak = { workspace = true }
+
 
 reth-node-api = { workspace = true }
 reth-node-builder = { workspace = true }

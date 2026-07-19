@@ -1,5 +1,5 @@
 //! Physical Layer & Peering Module
-//! Handles WireGuard interfaces, single-key derivation, and cross-manifold gossip.
+//! Handles `WireGuard` interfaces, single-key derivation, and cross-manifold gossip.
 
 #![warn(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]

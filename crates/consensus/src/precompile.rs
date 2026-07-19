@@ -1,24 +1,32 @@
 use alloy_primitives::{Address, Bytes};
+use tracing::debug;
 use k256::ecdsa::signature::Verifier;
 use k256::ecdsa::VerifyingKey;
 use ed25519_dalek::{VerifyingKey as EdVerifyingKey, Signature as EdSignature};
+use sovereign_attestation::AttestationProvider;
 
 /// The address of the cross-manifold precompile (0xff...ff).
 pub const CROSS_MANIFOLD_PRECOMPILE_ADDRESS: Address = Address::repeat_byte(0xff);
 
 /// Cross-Manifold Precompile (`0xff`) for `REMOTESTATICCALL`.
 /// Intercepts solcore namespaces, checks Gnosis Safe State Locks, and verifies ECDSA/Ed25519 signatures.
+///
+/// # Errors
+/// Returns an error if the input layout is invalid, signature scheme is unsupported, or verification fails.
 pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str> {
     if input.len() < 166 {
         return Err("Input too short");
     }
 
-    let _namespace = &input[0..32];
-    let target_manifold_id = u64::from_be_bytes(input[32..40].try_into().unwrap());
+    let _ = &input[0..32]; // namespace
+    let target_manifold_id = u64::from_be_bytes(
+        input[32..40].try_into().map_err(|_| "Invalid manifold ID bytes")?,
+    );
     let intent_hash = &input[40..72];
-    let _safe_address = Address::from_slice(&input[72..92]);
-    let _amount = &input[92..124];
-    let ttl = u64::from_be_bytes(input[124..132].try_into().unwrap());
+    let _ = Address::from_slice(&input[72..92]); // safe_address
+    let _ = &input[92..124]; // amount
+    let ttl = u64::from_be_bytes(input[124..132].try_into().map_err(|_| "Invalid TTL bytes")?);
+
     let scheme = input[132];
     let pubkey_bytes = &input[133..166];
     let signature_bytes = &input[166..];
@@ -49,7 +57,7 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
         }
         1 => {
             // Ed25519
-            let verifying_key = EdVerifyingKey::from_bytes(pubkey_bytes[0..32].try_into().unwrap())
+            let verifying_key = EdVerifyingKey::from_bytes(pubkey_bytes[0..32].try_into().map_err(|_| "Invalid Ed25519 key slice")?)
                 .map_err(|_| "Invalid Ed25519 public key")?;
             let sig = EdSignature::from_slice(signature_bytes)
                 .map_err(|_| "Invalid Ed25519 signature")?;
@@ -76,17 +84,23 @@ pub const SELECTOR_ENDORSE: [u8; 4] = [0xe3, 0x9f, 0xa2, 0x19];
 pub const SELECTOR_REGISTER_SGX: [u8; 4] = [0xfd, 0x92, 0xac, 0x81];
 /// Selector for registering a supported manifold route.
 pub const SELECTOR_REGISTER_MANIFOLD: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
-/// Selector for submitting a KZG PageRank vector commitment.
+/// Selector for submitting a KZG `PageRank` vector commitment.
 pub const SELECTOR_SUBMIT_COMMITMENT: [u8; 4] = [0xc1, 0xc2, 0xc3, 0xc4];
 
-/// Registry Precompile (`0xfe`) for managing node enrollment and TinyMeritRank.
+/// Registry Precompile (`0xfe`) for managing node enrollment and `TinyMeritRank`.
+///
+/// # Panics
+/// Panics if the selector retrieval fails (guaranteed not to if input length is checked).
+///
+/// # Errors
+/// Returns an error if the input layout is invalid, selector is unrecognized, or state updates fail.
 pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'static str> {
     if input.len() < 4 {
         return Err("Input too short");
     }
 
-    let selector: [u8; 4] = input[0..4].try_into().unwrap();
-    println!("DEBUG: execute_registry_call called with caller={:?}, selector={:?}", caller, selector);
+    let selector: [u8; 4] = input[0..4].try_into().expect("length already checked above");
+    debug!(caller = ?caller, ?selector, "execute_registry_call");
     let registry_lock = crate::registry::get_registry();
     let mut registry = registry_lock.write().map_err(|_| "Failed to lock registry")?;
 
@@ -106,22 +120,16 @@ pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'
             registry.endorse_validator(caller, candidate_did, weight_scaled)?;
         }
         SELECTOR_REGISTER_SGX => {
-            println!("DEBUG: SELECTOR_REGISTER_SGX matched");
             let candidate_did = decode_abi_string(input, 4)?;
-            println!("DEBUG: decoded candidate_did: {}", candidate_did);
             let quote = decode_abi_bytes(input, 36)?;
-            println!("DEBUG: decoded quote length: {}", quote.len());
+            debug!(did = %candidate_did, quote_len = quote.len(), "SELECTOR_REGISTER_SGX");
 
             let provider = sovereign_attestation::sgx::SgxAttestationProvider::new();
-            println!("DEBUG: created provider");
-            use sovereign_attestation::AttestationProvider;
             let verify_res = provider.verify_quote(&quote);
-            println!("DEBUG: verify_res: {:?}", verify_res);
+            debug!(valid = ?verify_res, "SGX quote verification result");
             if !verify_res.map_err(|_| "DCAP Quote verification failed")? {
                 return Err("Invalid SGX DCAP Quote");
             }
-            
-            println!("DEBUG: registering SGX node");
             registry.register_sgx_node(candidate_did)?;
         }
         SELECTOR_REGISTER_MANIFOLD => {
@@ -129,7 +137,9 @@ pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'
             if input.len() < 68 {
                 return Err("Input too short for registerSupportedManifold id");
             }
-            let target_manifold_id = u64::from_be_bytes(input[60..68].try_into().unwrap());
+            let target_manifold_id = u64::from_be_bytes(
+                input[60..68].try_into().map_err(|_| "Invalid manifold ID bytes")?,
+            );
             registry.register_supported_manifold(&candidate_did, target_manifold_id)?;
         }
         SELECTOR_SUBMIT_COMMITMENT => {
@@ -163,14 +173,16 @@ fn decode_abi_string(input: &[u8], offset_idx: usize) -> Result<String, &'static
     }
     let mut offset_bytes = [0u8; 8];
     offset_bytes.copy_from_slice(&input[offset_idx + 24 .. offset_idx + 32]);
-    let offset = u64::from_be_bytes(offset_bytes) as usize + 4; // Add 4 bytes for selector
+    let offset_u64 = u64::from_be_bytes(offset_bytes);
+    let offset = usize::try_from(offset_u64).map_err(|_| "Offset overflow")? + 4; // Add 4 bytes for selector
     
     if input.len() < offset + 32 {
         return Err("Input too short to read string length");
     }
     let mut len_bytes = [0u8; 8];
     len_bytes.copy_from_slice(&input[offset + 24 .. offset + 32]);
-    let length = u64::from_be_bytes(len_bytes) as usize;
+    let length_u64 = u64::from_be_bytes(len_bytes);
+    let length = usize::try_from(length_u64).map_err(|_| "Length overflow")?;
     
     if input.len() < offset + 32 + length {
         return Err("Input too short for string data");
@@ -185,14 +197,16 @@ fn decode_abi_bytes(input: &[u8], offset_idx: usize) -> Result<Vec<u8>, &'static
     }
     let mut offset_bytes = [0u8; 8];
     offset_bytes.copy_from_slice(&input[offset_idx + 24 .. offset_idx + 32]);
-    let offset = u64::from_be_bytes(offset_bytes) as usize + 4; // Add 4 bytes for selector
+    let offset_u64 = u64::from_be_bytes(offset_bytes);
+    let offset = usize::try_from(offset_u64).map_err(|_| "Offset overflow")? + 4; // Add 4 bytes for selector
     
     if input.len() < offset + 32 {
         return Err("Input too short to read bytes length");
     }
     let mut len_bytes = [0u8; 8];
     len_bytes.copy_from_slice(&input[offset + 24 .. offset + 32]);
-    let length = u64::from_be_bytes(len_bytes) as usize;
+    let length_u64 = u64::from_be_bytes(len_bytes);
+    let length = usize::try_from(length_u64).map_err(|_| "Length overflow")?;
     
     if input.len() < offset + 32 + length {
         return Err("Input too short for bytes data");
@@ -200,6 +214,7 @@ fn decode_abi_bytes(input: &[u8], offset_idx: usize) -> Result<Vec<u8>, &'static
     Ok(input[offset + 32 .. offset + 32 + length].to_vec())
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn u256_to_f64(bytes: &[u8]) -> Result<f64, &'static str> {
     if bytes.len() != 32 {
         return Err("Invalid weight bytes");
@@ -213,10 +228,12 @@ fn u256_to_f64(bytes: &[u8]) -> Result<f64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use k256::ecdsa::signature::Signer;
     use k256::ecdsa::SigningKey;
 
     #[test]
+    #[serial]
     fn test_execute_cross_manifold_call() {
         let reg_lock = crate::registry::get_registry();
         {
@@ -304,12 +321,12 @@ mod tests {
         offset[31] = 0x20;
         data.extend_from_slice(&offset);
         let mut len = [0u8; 32];
-        len[31] = val.len() as u8;
+        len[31] = u8::try_from(val.len()).expect("val.len() fits in u8");
         data.extend_from_slice(&len);
         let mut str_bytes = val.as_bytes().to_vec();
         let rem = str_bytes.len() % 32;
         if rem != 0 {
-            str_bytes.extend(std::iter::repeat(0).take(32 - rem));
+            str_bytes.resize(str_bytes.len() + (32 - rem), 0);
         }
         data.extend_from_slice(&str_bytes);
         data
@@ -333,12 +350,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn test_execute_registry_call() {
         {
             let mut reg = crate::registry::get_registry().write().unwrap();
             *reg = crate::registry::ValidatorRegistry::new();
         }
-        println!("TEST DEBUG: starting test_execute_registry_call");
+
         let genesis_seed = Address::repeat_byte(0x99);
         
         // Generate valid candidate DIDs dynamically
@@ -347,7 +365,7 @@ mod tests {
         let candidate_addr = Address::repeat_byte(0x99); // Genesis seed address for verification in test
 
         // 1. Propose validator from a non-validator (should fail)
-        println!("TEST DEBUG: Step 1 (invalid propose)...");
+
         let mut propose_payload = Vec::new();
         propose_payload.extend_from_slice(&SELECTOR_PROPOSE);
         propose_payload.extend_from_slice(&encode_abi_string(&candidate_did));
@@ -357,12 +375,12 @@ mod tests {
         assert!(res.is_err());
 
         // 2. Propose validator from genesis seed (should succeed)
-        println!("TEST DEBUG: Step 2 (valid propose)...");
+
         let res = execute_registry_call(genesis_seed, &Bytes::from(propose_payload));
         assert!(res.is_ok(), "Expected Ok, got Err: {:?}", res.err());
 
         // 3. Endorse validator with weight
-        println!("TEST DEBUG: Step 3 (endorse)...");
+
         let mut endorse_payload = Vec::new();
         endorse_payload.extend_from_slice(&SELECTOR_ENDORSE);
         
@@ -378,12 +396,12 @@ mod tests {
 
         // String payload
         let mut len_did = [0u8; 32];
-        len_did[31] = candidate_did.len() as u8;
+        len_did[31] = u8::try_from(candidate_did.len()).expect("did length fits in u8");
         endorse_payload.extend_from_slice(&len_did);
         let mut did_bytes = candidate_did.as_bytes().to_vec();
         let rem = did_bytes.len() % 32;
         if rem != 0 {
-            did_bytes.extend(std::iter::repeat(0).take(32 - rem));
+            did_bytes.resize(did_bytes.len() + (32 - rem), 0);
         }
         endorse_payload.extend_from_slice(&did_bytes);
 
@@ -399,9 +417,7 @@ mod tests {
         }
 
         // 4. Register SGX Node permissionlessly
-        println!("TEST DEBUG: Step 4 (sgx register)...");
         let sgx_candidate_did = create_test_did("zQ3shok17vjUvJgqG3Yme5fQwQDndx8C5Jea95D4A8YnUFs2t", true);
-        println!("TEST DEBUG: SGX DID created: {}", sgx_candidate_did);
         
         let mut sgx_payload = Vec::new();
         sgx_payload.extend_from_slice(&SELECTOR_REGISTER_SGX);
@@ -418,24 +434,24 @@ mod tests {
 
         // String payload (did)
         let mut len_did = [0u8; 32];
-        len_did[31] = sgx_candidate_did.len() as u8;
+        len_did[31] = u8::try_from(sgx_candidate_did.len()).expect("sgx_candidate_did length fits in u8");
         sgx_payload.extend_from_slice(&len_did);
         let mut did_bytes = sgx_candidate_did.as_bytes().to_vec();
         let rem = did_bytes.len() % 32;
         if rem != 0 {
-            did_bytes.extend(std::iter::repeat(0).take(32 - rem));
+            did_bytes.resize(did_bytes.len() + (32 - rem), 0);
         }
         sgx_payload.extend_from_slice(&did_bytes);
 
         // Bytes payload (quote)
         let quote_data = b"MOCK_SGX_QUOTE_VALID_PROVEN_BY_INTEL_DCAP";
         let mut len_quote = [0u8; 32];
-        len_quote[31] = quote_data.len() as u8;
+        len_quote[31] = u8::try_from(quote_data.len()).expect("quote length fits in u8");
         sgx_payload.extend_from_slice(&len_quote);
         let mut quote_bytes = quote_data.to_vec();
         let rem = quote_bytes.len() % 32;
         if rem != 0 {
-            quote_bytes.extend(std::iter::repeat(0).take(32 - rem));
+            quote_bytes.resize(quote_bytes.len() + (32 - rem), 0);
         }
         sgx_payload.extend_from_slice(&quote_bytes);
 
@@ -484,16 +500,15 @@ mod tests {
             assert!(active.values().any(|&a| a == derived_addr), "SGX node should be active after meeting threshold");
         }
 
-        // Cleanup threshold
+        // Reset registry to clean state so subsequent serial tests start fresh.
         {
             let mut reg = reg_lock.write().unwrap();
-            reg.sgx_reputation_threshold = 0.0;
+            *reg = crate::registry::ValidatorRegistry::new();
         }
-
-        println!("TEST DEBUG: finished successfully!");
     }
 
     #[test]
+    #[serial]
     fn test_registry_mesh_quorum() {
         let reg_lock = crate::registry::get_registry();
         let mut reg = reg_lock.write().unwrap();
@@ -572,7 +587,7 @@ mod tests {
             "did:peer:4:courier".to_string(),
             &seed,
             mock_rpc.clone(),
-        );
+        ).unwrap();
         
         // Should not be suspended initially
         assert!(!courier.check_funding_and_suspend());
@@ -593,21 +608,22 @@ mod tests {
         assert!(!courier.is_suspended);
     }
     #[test]
+    #[serial]
     fn test_publishing_window_enforcement() {
         let reg_lock = crate::registry::get_registry();
         let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
-        
+        let caller = Address::repeat_byte(0xaa);
+
         {
             let mut reg = reg_lock.write().unwrap();
             *reg = crate::registry::ValidatorRegistry::new();
             reg.epoch_length = 1000;
             reg.publishing_window = 100;
             reg.current_block = 50; // Within window
-            reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
+            // Register mock validator AND map caller address → DID so ownership check passes.
+            reg.add_mock_validator(mock_did.clone(), caller, [0x99; 32]);
             reg.reputation.insert(mock_did.clone(), 1.0); // Required for index
         }
-        
-        let caller = Address::repeat_byte(0xaa);
         let mut payload = Vec::new();
         payload.extend_from_slice(&SELECTOR_SUBMIT_COMMITMENT);
         // string offset = 32 (encoded in 32 bytes)
@@ -617,7 +633,7 @@ mod tests {
         
         // string length (encoded in 32 bytes)
         let mut len_bytes = [0u8; 32];
-        len_bytes[31] = mock_did.len() as u8; // Assume < 255
+        len_bytes[31] = u8::try_from(mock_did.len()).expect("mock_did length fits in u8"); // Assume < 255
         payload.extend_from_slice(&len_bytes);
         
         payload.extend_from_slice(mock_did.as_bytes());

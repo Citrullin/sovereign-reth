@@ -1,13 +1,14 @@
 //! Manage `wg0` interface and parse `did:peer:4` URIs.
 
-/// WireGuard interface manager.
+/// `WireGuard` interface manager.
 pub struct WireguardManager {
     /// Name of the interface (e.g., `wg0`).
     pub interface_name: String,
 }
 
 impl WireguardManager {
-    /// Initializes a new WireguardManager.
+    /// Initializes a new `WireguardManager`.
+    #[must_use]
     pub fn new(interface_name: &str) -> Self {
         Self {
             interface_name: interface_name.to_string(),
@@ -15,6 +16,9 @@ impl WireguardManager {
     }
 
     /// Sets up the interface.
+    ///
+    /// # Errors
+    /// Returns an error if the setup fails.
     pub fn setup_interface(&self, _private_key: &str, _listen_port: u16) -> Result<(), String> {
         // In a real implementation we would use netlink or `wg` CLI.
         // E.g., `ip link add dev wg0 type wireguard`
@@ -24,6 +28,9 @@ impl WireguardManager {
     }
 
     /// Adds a peer by parsing its `did:peer:4` URI.
+    ///
+    /// # Errors
+    /// Returns an error if the DID format is invalid.
     pub fn add_peer_from_did(&self, did: &str, _endpoint_ip: &str) -> Result<(), String> {
         if !did.starts_with("did:peer:4:") {
             return Err("Invalid DID format".into());

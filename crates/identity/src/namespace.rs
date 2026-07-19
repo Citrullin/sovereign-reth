@@ -16,6 +16,7 @@ pub struct NamespaceRegistry {
 
 impl NamespaceRegistry {
     /// Creates a new Namespace Registry.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -26,8 +27,10 @@ impl NamespaceRegistry {
     /// - First 3 names (1 main, 2 secondary) incur no penalty.
     /// - Additional names face an exponential penalty on their reputation score.
     /// - Staking can augment the claim score, but the required stake scales up exponentially to protect against the social layer.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_precision_loss)]
     pub fn calculate_score(&self, did: &str, reputation: f64, proposed_stake: u64) -> f64 {
-        let existing_names = self.did_names.get(did).map_or(0, |n| n.len());
+        let existing_names = self.did_names.get(did).map_or(0, Vec::len);
         
         // Slot system: up to 3 slots has no penalty.
         let extra_slots = if existing_names >= 3 {
@@ -65,7 +68,7 @@ impl NamespaceRegistry {
 
             // Conflict resolution.
             let owner_reputation = 1.0; // Mock current owner reputation
-            let owner_stake = self.stakes.get(&current_owner).cloned().unwrap_or(0);
+            let owner_stake = self.stakes.get(&current_owner).copied().unwrap_or(0);
             
             let owner_score = self.calculate_score(&current_owner, owner_reputation, owner_stake);
             let challenger_score = self.calculate_score(&challenger_did, challenger_reputation, stake);
@@ -110,14 +113,14 @@ mod tests {
         // Score for 4th name (extra_slots = 1)
         let score_4th = registry.calculate_score(alice, 10.0, 0);
         // reputation / 10^1 = 1.0
-        assert_eq!(score_4th, 1.0);
+        assert!((score_4th - 1.0).abs() < f64::EPSILON);
 
         // Score for 5th name (extra_slots = 2)
         // We register a 4th name first
         assert!(registry.register("alice4.sovereign".into(), alice.into(), 10.0, 0));
         let score_5th = registry.calculate_score(alice, 10.0, 0);
         // reputation / 10^2 = 0.1
-        assert_eq!(score_5th, 0.1);
+        assert!((score_5th - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -155,9 +158,9 @@ mod tests {
             registry.register(format!("alice{i}.sovereign"), alice.into(), 10.0, 0);
         }
         
-        // Alice claims "shared.sovereign" (her 5th) and stakes 200 tokens.
-        // Alice's score: 10.0 / 10^2 + 200 / (100 * 2^2) = 0.1 + 0.5 = 0.6
-        registry.register("shared.sovereign".into(), alice.into(), 10.0, 200);
+        // Alice claims "shared.sovereign" (her 5th) and stakes 400 tokens.
+        // Alice's score: 1.0 / 10^3 + 400 / (100 * 2^3) = 0.001 + 0.5 = 0.501
+        registry.register("shared.sovereign".into(), alice.into(), 10.0, 400);
 
         // Bob tries to claim with raw reputation 0.5 and no stake.
         // Bob's score: 0.5

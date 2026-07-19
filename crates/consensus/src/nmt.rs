@@ -30,6 +30,14 @@ pub struct NmtLeaf {
     pub data: Vec<u8>,
 }
 
+/// The result of a namespace range proof query: leaf data and the associated proof.
+pub struct NamespaceRangeResult {
+    /// The raw leaf data items returned for the requested range.
+    pub leaves: Vec<Vec<u8>>,
+    /// The namespace inclusion proof.
+    pub proof: NamespaceProof<NamespacedSha2Hasher<NS_ID_SIZE>, NS_ID_SIZE>,
+}
+
 /// Namespace Merkle Tree wrapper.
 pub struct NamespaceMerkleTree {
     inner: CelestiaNmt,
@@ -43,6 +51,7 @@ impl Default for NamespaceMerkleTree {
 
 impl NamespaceMerkleTree {
     /// Creates a new Namespaced Merkle Tree.
+    #[must_use]
     pub fn new() -> Self {
         let hasher = NamespacedSha2Hasher::with_ignore_max_ns(true);
         Self {
@@ -65,11 +74,12 @@ impl NamespaceMerkleTree {
     }
 
     /// Generates a namespace inclusion proof for a range of leaves.
-    pub fn get_range_with_proof(
-        &mut self,
-        range: Range<usize>,
-    ) -> (Vec<Vec<u8>>, NamespaceProof<nmt_rs::NamespacedSha2Hasher<NS_ID_SIZE>, NS_ID_SIZE>) {
-        self.inner.get_range_with_proof(range)
+    ///
+    /// Returns a [`NamespaceRangeResult`] wrapping the leaf data and proof,
+    /// rather than exposing the raw `Vec<Vec<u8>>` from the underlying library.
+    pub fn get_range_with_proof(&mut self, range: Range<usize>) -> NamespaceRangeResult {
+        let (leaves, proof) = self.inner.get_range_with_proof(range);
+        NamespaceRangeResult { leaves, proof }
     }
 }
 
@@ -97,12 +107,16 @@ mod tests {
         assert_eq!(root.min_namespace().0, NamespaceId::from(1).0);
         assert_eq!(root.max_namespace().0, NamespaceId::from(2).0);
 
-        // Fetch range with proof
-        let (leaves, proof) = tree.get_range_with_proof(0..1);
-        assert_eq!(leaves[0], b"state_diff_part1");
-        
+        // Fetch range with proof via clean wrapper type
+        let result = tree.get_range_with_proof(0..1);
+        assert_eq!(result.leaves[0], b"state_diff_part1");
+
         // Verify proof
-        let res = proof.verify_complete_namespace(&root, &leaves, NmtNamespaceId(NamespaceId::from(1).0));
+        let res = result.proof.verify_complete_namespace(
+            &root,
+            &result.leaves,
+            NmtNamespaceId(NamespaceId::from(1).0),
+        );
         assert!(res.is_ok());
     }
 }

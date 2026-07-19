@@ -2,7 +2,7 @@
 //! Allows members of an organization to expose a compliant query relay endpoint
 //! bridging external X-Road Security Server calls to the Sovereign Reth consensus layer.
 
-use sovereign_consensus::metalex::{BorgOrganization, MetalexManager};
+use sovereign_consensus::metalex::MetalexManager;
 
 /// Mock X-Road SOAP request header structures.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -25,6 +25,7 @@ pub struct XRoadRelay {
 
 impl XRoadRelay {
     /// Creates a new X-Road Relay instance.
+    #[must_use]
     pub fn new(metalex_manager: MetalexManager) -> Self {
         Self { metalex_manager }
     }
@@ -32,6 +33,9 @@ impl XRoadRelay {
     /// Handles a SOAP-like X-Road payload query.
     ///
     /// Exposes organization structure to external systems in a signed, auditable format.
+    ///
+    /// # Errors
+    /// Returns an error if the `org_did` is not found or serialization fails.
     pub fn query_organization_state(&self, org_did: &str, _header: &XRoadRequestHeader) -> Result<String, &'static str> {
         if let Some(org) = self.metalex_manager.orgs.get(org_did) {
             // Build response signed by the organization's did:peer:4 key.
@@ -39,7 +43,7 @@ impl XRoadRelay {
             // We represent the signed payload as a JSON document containing the organization state
             // and a mock cryptographic signature.
             let payload = serde_json::to_string(org).map_err(|_| "Failed to serialize org state")?;
-            let mock_signature = format!("signed:did:peer:4:{}", org_did);
+            let mock_signature = format!("signed:did:peer:4:{org_did}");
             
             let response = serde_json::json!({
                 "xroad_response": {
@@ -60,6 +64,7 @@ impl XRoadRelay {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use sovereign_consensus::metalex::BorgOrganization;
 
     #[test]
     fn test_xroad_relay_query() {
@@ -77,7 +82,7 @@ mod tests {
         // Setup registry
         let audit = sovereign_consensus::metalex::RealityAudit {
             epoch: 1,
-            validator_signatures: vec![vec![1]],
+            validator_signatures: vec![alloy_primitives::Bytes::from_static(&[1])],
         };
         let _ = metalex_manager.register_or_update_org(org, &audit, 1);
         

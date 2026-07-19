@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use revm_state::AccountInfo;
 use revm_bytecode::Bytecode;
 use revm_database_interface::Database;
@@ -39,7 +39,7 @@ impl Database for WitnessDatabase {
                 nonce: acc.nonce,
                 code_hash: acc.code_hash,
                 code: Some(Bytecode::new_raw(acc.code.clone().into())),
-                account_id: Default::default(),
+                account_id: Option::default(),
             }))
         } else {
             Ok(None)
@@ -66,10 +66,13 @@ impl Database for WitnessDatabase {
 
 /// Validate an implicit state block (State Root + State Diff Δ + Signatures)
 /// bypassing standard EVM execution.
+///
+/// # Errors
+/// Returns an error if signatures are missing or the state diff is empty.
 pub fn validate_implicit_state_block(
     _state_root: B256,
     state_diff: &[u8],
-    signatures: &[Vec<u8>],
+    signatures: &[Bytes],
 ) -> Result<B256, &'static str> {
     // 1. Verify signatures from validators to check block authenticity
     if signatures.is_empty() {
@@ -111,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_implicit_state_block_validation() {
-        let signatures = vec![vec![0x1; 65]];
+        let signatures = vec![Bytes::from(vec![0x1u8; 65])];
         let state_diff = vec![0x99];
         let root = B256::repeat_byte(0xaa);
 

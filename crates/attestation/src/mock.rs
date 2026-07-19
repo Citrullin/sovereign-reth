@@ -8,6 +8,7 @@ pub struct MockAttestationProvider;
 
 impl MockAttestationProvider {
     /// Creates a new mock attestation provider.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

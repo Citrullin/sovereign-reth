@@ -74,7 +74,7 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for Transacti
     }
 
     fn gas_limit(&self) -> u64 {
-        self.transaction.gas_limit() as u64
+        self.transaction.gas_limit()
     }
 
     fn gas_price(&self) -> Option<u128> {

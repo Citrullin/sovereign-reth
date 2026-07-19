@@ -16,6 +16,7 @@ impl Default for BgpGossipRouter {
 
 impl BgpGossipRouter {
     /// Creates a new BGP gossip router.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             write_intents: std::collections::HashMap::new(),
@@ -26,7 +27,7 @@ impl BgpGossipRouter {
     pub fn route_intent(&mut self, target_manifold: u64, intent: Vec<u8>) {
         self.write_intents
             .entry(target_manifold)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(intent);
     }
 
@@ -34,6 +35,6 @@ impl BgpGossipRouter {
     pub fn process_outgoing(&mut self, target_manifold: u64) -> Option<Vec<u8>> {
         self.write_intents
             .get_mut(&target_manifold)
-            .and_then(|q| q.pop_front())
+            .and_then(VecDeque::pop_front)
     }
 }

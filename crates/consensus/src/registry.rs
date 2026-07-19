@@ -1,9 +1,12 @@
-//! DPoT Validator Directory module.
+//! `DPoT` Validator Directory module.
 
 use alloy_primitives::Address;
+use c_kzg::{Bytes32, Bytes48};
+use k256::elliptic_curve::sec1::ToSec1Point as _;
 use std::collections::{HashMap, HashSet};
+use tracing::{debug, warn};
 
-/// Represents the type of a validator in the DPoT system.
+/// Represents the type of a validator in the `DPoT` system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatorType {
     /// Hardware TEE validator (high security).
@@ -12,18 +15,18 @@ pub enum ValidatorType {
     VanillaSocial,
 }
 
-/// DPoT Validator Directory with TinyMeritRank reputation using did:peer:4.
+/// `DPoT` Validator Directory with `TinyMeritRank` reputation using did:peer:4.
 #[derive(Debug, Clone)]
 pub struct ValidatorRegistry {
     /// Active validators mapped to their type.
     validators: HashMap<String, ValidatorType>,
-    /// Resolved WireGuard keys mapped by DID.
+    /// Resolved `WireGuard` keys mapped by DID.
     peer_keys: HashMap<String, [u8; 32]>,
     /// Mapping from resolved EVM Address to DID.
     address_to_did: HashMap<Address, String>,
     /// The seeds (bootstrap roots) of trust.
     seeds: HashSet<String>,
-    /// Directed edges: u_did -> (v_did, weight) representing endorsements.
+    /// Directed edges: `u_did` -> (`v_did`, weight) representing endorsements.
     pub endorsements: HashMap<String, HashMap<String, f64>>,
     /// Global reputation mapping: DID -> Score
     pub reputation: HashMap<String, f64>,
@@ -33,7 +36,7 @@ pub struct ValidatorRegistry {
     supported_manifolds: HashMap<String, HashSet<u64>>,
     /// Threshold to enforce minimum required validators for organic manifold routing
     pub manifold_quorum_threshold: usize,
-    /// Epoch length in blocks (default 30 days = ~1_296_000 blocks at 2s)
+    /// Epoch length in blocks (default 30 days = ~`1_296_000` blocks at 2s)
     pub epoch_length: u64,
     /// Publishing window length in blocks (default ~10 min = 300 blocks at 2s)
     pub publishing_window: u64,
@@ -51,6 +54,9 @@ impl Default for ValidatorRegistry {
 
 impl ValidatorRegistry {
     /// Creates a new validator registry and bootstraps with default genesis seeds.
+    ///
+    /// # Panics
+    /// Panics if bootstrap genesis peer DID creation fails.
     pub fn new() -> Self {
         let mut registry = Self {
             validators: HashMap::new(),
@@ -74,7 +80,7 @@ impl ValidatorRegistry {
             purpose: did_peer::DIDPeerKeys::Verification,
             public_key_multibase: Some("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string()),
         }];
-        let (genesis_did, _) = did_peer::DIDPeer::create_peer_did(&keys, None).unwrap();
+        let (genesis_did, _) = did_peer::DIDPeer::create_peer_did(&keys, None).expect("Genesis peer DID generation is deterministic and must succeed");
         let genesis_addr = Address::repeat_byte(0x99);
 
         registry.seeds.insert(genesis_did.clone());
@@ -91,6 +97,10 @@ impl ValidatorRegistry {
         registry
     }
 
+    /// Submits an epoch commitment and proofs.
+    ///
+    /// # Errors
+    /// Returns an error if the caller does not own the DID or if submission is not within the publishing window.
     pub fn submit_commitment(
         &mut self,
         caller: Address,
@@ -111,7 +121,6 @@ impl ValidatorRegistry {
         sorted_dids.sort();
         let index = sorted_dids.iter().position(|&d| d == &did).ok_or("DID not found in reputation map")?;
 
-        use c_kzg::{Bytes32, Bytes48};
         let c_bytes = Bytes48::from_bytes(&commitment).map_err(|_| "Invalid commitment bytes")?;
         let p_bytes = Bytes48::from_bytes(&proof).map_err(|_| "Invalid proof bytes")?;
         let y_bytes = Bytes32::from_bytes(&y).map_err(|_| "Invalid y bytes")?;
@@ -127,7 +136,10 @@ impl ValidatorRegistry {
         Ok(())
     }
 
-    /// Resolves EVM Address and WireGuard key from DID and registers as TEE validator.
+    /// Resolves EVM Address and `WireGuard` key from DID and registers as TEE validator.
+    ///
+    /// # Errors
+    /// Returns an error if the DID fails to resolve.
     pub fn register_sgx_node(&mut self, candidate_did: String) -> Result<(), &'static str> {
         let (addr, wg_key) = self.resolve_did_keys(&candidate_did)?;
         self.validators.insert(candidate_did.clone(), ValidatorType::HardwareTEE);
@@ -137,6 +149,9 @@ impl ValidatorRegistry {
     }
 
     /// Proposes a new social validator (creates initial endorsement).
+    ///
+    /// # Errors
+    /// Returns an error if the proposer is not registered or candidate resolution fails.
     pub fn propose_validator(&mut self, proposer_addr: Address, candidate_did: String) -> Result<(), &'static str> {
         let _proposer_did = self.address_to_did.get(&proposer_addr)
             .ok_or("Proposer must be an active registered validator")?
@@ -150,6 +165,9 @@ impl ValidatorRegistry {
     }
 
     /// Endorses a candidate with a specific weight.
+    ///
+    /// # Errors
+    /// Returns an error if the endorser is not registered.
     pub fn endorse_validator(&mut self, endorser_addr: Address, candidate_did: String, weight: f64) -> Result<(), &'static str> {
         let endorser_did = self.address_to_did.get(&endorser_addr)
             .ok_or("Endorser must be an active registered validator")?
@@ -161,8 +179,9 @@ impl ValidatorRegistry {
         Ok(())
     }
 
+    #[allow(clippy::unused_self)]
     fn resolve_did_keys(&self, did: &str) -> Result<(Address, [u8; 32]), &'static str> {
-        println!("DEBUG: resolving DID {}", did);
+        debug!(did, "Resolving DID keys");
         // Resolve using the identity crate on an isolated thread with its own tokio runtime to prevent deadlocks
         let did_str = did.to_string();
         let resolved = std::thread::spawn(move || {
@@ -172,7 +191,7 @@ impl ValidatorRegistry {
                 .map_err(|_| "Failed to build local tokio runtime")?;
             rt.block_on(sovereign_identity::DidPeer4::resolve(&did_str))
         }).join().map_err(|_| "Thread panic during DID resolution")??;
-        println!("DEBUG: resolved DID successfully: {:?}", resolved);
+        debug!(did, key_type = ?resolved.key_type, "DID resolved successfully");
         
         let mut wg_key = [0u8; 32];
         let bytes = &resolved.public_key;
@@ -184,7 +203,6 @@ impl ValidatorRegistry {
             sovereign_identity::KeyType::Secp256k1 => {
                 let pk = k256::PublicKey::from_sec1_bytes(&resolved.public_key)
                     .map_err(|_| "Failed to parse public key bytes")?;
-                use k256::elliptic_curve::sec1::ToSec1Point;
                 let uncompressed = pk.to_sec1_point(false);
                 let hash = alloy_primitives::keccak256(&uncompressed.as_bytes()[1..]);
                 Address::from_slice(&hash[12..32])
@@ -199,7 +217,7 @@ impl ValidatorRegistry {
         Ok((addr, wg_key))
     }
 
-    /// Returns the active WireGuard peer keys.
+    /// Returns the active `WireGuard` peer keys.
     pub fn active_peers(&self) -> HashMap<[u8; 32], Address> {
         let mut active = HashMap::new();
         for (did, &peer_key) in &self.peer_keys {
@@ -222,12 +240,15 @@ impl ValidatorRegistry {
     }
 
     /// Registers a manifold that the validator is willing to route to.
+    ///
+    /// # Errors
+    /// Returns an error if the DID is not registered as a validator.
     pub fn register_supported_manifold(&mut self, did: &str, target_manifold_id: u64) -> Result<(), &'static str> {
         if !self.validators.contains_key(did) {
             return Err("Only registered validators can declare routing support");
         }
         
-        let entry = self.supported_manifolds.entry(did.to_string()).or_insert_with(HashSet::new);
+        let entry = self.supported_manifolds.entry(did.to_string()).or_default();
         entry.insert(target_manifold_id);
         
         // Operator Warning if quorum is not met
@@ -239,9 +260,13 @@ impl ValidatorRegistry {
         }
         
         if total_supporters < self.manifold_quorum_threshold {
-            // Log a warning so the operator knows the route is not yet secure/active
-            eprintln!("WARN: [INSUFFICIENT QUORUM] Validator {} registered for manifold {}, but total ({}) is below threshold ({}). Route is not yet secure/active.",
-                did, target_manifold_id, total_supporters, self.manifold_quorum_threshold);
+            warn!(
+                did,
+                target_manifold_id,
+                total_supporters,
+                threshold = self.manifold_quorum_threshold,
+                "Insufficient quorum — manifold route is not yet secure/active",
+            );
         }
         
         Ok(())
@@ -272,7 +297,8 @@ impl ValidatorRegistry {
         routable
     }
 
-    /// Computes TinyMeritRank reputation using Personalized PageRank.
+    /// Computes `TinyMeritRank` reputation using Personalized `PageRank`.
+    #[allow(clippy::cast_precision_loss)]
     pub fn compute_pagerank(&mut self) {
         if self.seeds.is_empty() {
             return;
@@ -373,17 +399,17 @@ impl ValidatorRegistry {
         };
 
         for (u, neighbors) in graph {
-            add_edge(format!("{}_in", u), format!("{}_out", u), 1);
+            add_edge(format!("{u}_in"), format!("{u}_out"), 1);
             for v in neighbors {
-                add_edge(format!("{}_out", u), format!("{}_in", v), 10000);
+                add_edge(format!("{u}_out"), format!("{v}_in"), 10000);
             }
         }
         
         let super_source = "SUPER_SOURCE".to_string();
         for s in sources {
-            add_edge(super_source.clone(), format!("{}_in", s), 10000);
+            add_edge(super_source.clone(), format!("{s}_in"), 10000);
         }
-        let target_in = format!("{}_in", target);
+        let target_in = format!("{target}_in");
         
         let mut max_flow = 0;
         let mut flow: HashMap<(String, String), i32> = HashMap::new();
@@ -419,8 +445,8 @@ impl ValidatorRegistry {
             let mut path_flow = i32::MAX;
             let mut curr = target_in.clone();
             while curr != super_source {
-                let p = parent.get(&curr).unwrap();
-                let cap = *capacity.get(&(p.clone(), curr.clone())).unwrap();
+                let p = parent.get(&curr).expect("BFS path guarantees predecessor exists");
+                let cap = *capacity.get(&(p.clone(), curr.clone())).expect("Graph build guarantees capacity edge exists");
                 let f = *flow.get(&(p.clone(), curr.clone())).unwrap_or(&0);
                 path_flow = path_flow.min(cap - f);
                 curr = p.clone();
@@ -428,7 +454,7 @@ impl ValidatorRegistry {
             
             let mut curr = target_in.clone();
             while curr != super_source {
-                let p = parent.get(&curr).unwrap();
+                let p = parent.get(&curr).expect("BFS path guarantees predecessor exists");
                 *flow.entry((p.clone(), curr.clone())).or_insert(0) += path_flow;
                 *flow.entry((curr.clone(), p.clone())).or_insert(0) -= path_flow;
                 curr = p.clone();
@@ -436,7 +462,10 @@ impl ValidatorRegistry {
             max_flow += path_flow;
         }
         
-        max_flow as usize
+        #[allow(clippy::cast_sign_loss)]
+        {
+            max_flow as usize
+        }
     }
 
     /// Promotes social validators if their reputation exceeds the threshold (0.05).
@@ -448,7 +477,7 @@ impl ValidatorRegistry {
         }
     }
 
-    /// Applies monthly temporal decay: R_i(j) = (1 - gamma) * R_i(j) + delta_R * gamma
+    /// Applies monthly temporal decay: `R_i(j)` = (1 - gamma) * `R_i(j)` + `delta_R` * gamma
     pub fn apply_temporal_decay(&mut self) {
         let gamma = 0.05;
         let delta_r = 0.05;
@@ -478,10 +507,7 @@ impl ValidatorRegistry {
 
     /// Returns the reputation of a validator by address.
     pub fn get_reputation_by_address(&self, address: &Address) -> f64 {
-        let did = match self.address_to_did.get(address) {
-            Some(d) => d,
-            None => return 0.0,
-        };
+        let Some(did) = self.address_to_did.get(address) else { return 0.0; };
         self.reputation.get(did).copied().unwrap_or(0.0)
     }
 
@@ -576,10 +602,10 @@ mod tests {
         crate::slashing::SlashingManager::slash_cartels(&mut registry, 0.5);
 
         // A and B should be slashed by 0.5
-        assert_eq!(*registry.reputation.get("did:peer:A").unwrap(), 0.5);
-        assert_eq!(*registry.reputation.get("did:peer:B").unwrap(), 0.5);
+        assert!((*registry.reputation.get("did:peer:A").unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!((*registry.reputation.get("did:peer:B").unwrap() - 0.5).abs() < f64::EPSILON);
         // C should not be slashed
-        assert_eq!(*registry.reputation.get("did:peer:C").unwrap(), 1.0);
+        assert!((*registry.reputation.get("did:peer:C").unwrap() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -595,9 +621,9 @@ mod tests {
         crate::slashing::SlashingManager::slash_missing_commitments(&mut registry, 0.4);
 
         // Node A did submit, so reputation stays 1.0
-        assert_eq!(*registry.reputation.get("did:peer:A").unwrap(), 1.0);
+        assert!((*registry.reputation.get("did:peer:A").unwrap() - 1.0).abs() < f64::EPSILON);
         // Node B missed, so reputation slashed by 0.4 -> 0.6
-        assert_eq!(*registry.reputation.get("did:peer:B").unwrap(), 0.6);
+        assert!((*registry.reputation.get("did:peer:B").unwrap() - 0.6).abs() < f64::EPSILON);
         // Commitments list should be reset/cleared for the next epoch
         assert!(registry.commitments.is_empty());
     }

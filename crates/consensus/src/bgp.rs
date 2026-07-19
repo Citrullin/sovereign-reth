@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 pub struct BgpRouter {
     /// Map of Manifold ID to set of adjacent validators.
     adjacent_validators: HashMap<u64, HashSet<Address>>,
-    /// Local static private key for WireGuard.
+    /// Local static private key for `WireGuard`.
     local_private_key: StaticSecret,
-    /// Local static public key for WireGuard.
+    /// Local static public key for `WireGuard`.
     pub local_public_key: PublicKey,
-    /// WireGuard tunnels mapped by peer public key.
+    /// `WireGuard` tunnels mapped by peer public key.
     pub tunnels: HashMap<[u8; 32], Tunn>,
 }
 
@@ -26,11 +26,13 @@ impl Default for BgpRouter {
 
 impl BgpRouter {
     /// Creates a new BGP Router with a randomly generated local private key.
+    #[must_use]
     pub fn new() -> Self {
         // Generate a random local private key using an array of 32 bytes
         let mut rng_bytes = [0u8; 32];
         for (i, byte) in rng_bytes.iter_mut().enumerate() {
-            *byte = (i as u8).wrapping_mul(7).wrapping_add(42);
+            let val = u8::try_from(i).unwrap_or(0);
+            *byte = val.wrapping_mul(7).wrapping_add(42);
         }
         let local_private_key = StaticSecret::from(rng_bytes);
         let local_public_key = PublicKey::from(&local_private_key);
@@ -54,7 +56,7 @@ impl BgpRouter {
         self.adjacent_validators.get(&manifold_id)
     }
 
-    /// Registers a peer with their public key and sets up a WireGuard tunnel.
+    /// Registers a peer with their public key and sets up a `WireGuard` tunnel.
     pub fn register_peer(&mut self, peer_public_key: [u8; 32]) {
         let peer_pub = PublicKey::from(peer_public_key);
         let local_priv = StaticSecret::from(self.local_private_key.to_bytes());
@@ -70,13 +72,10 @@ impl BgpRouter {
         self.tunnels.insert(peer_public_key, tunnel);
     }
 
-    /// Syncs the WireGuard tunnels dynamically from the validator registry.
+    /// Syncs the `WireGuard` tunnels dynamically from the validator registry.
     pub fn sync_peers_from_registry(&mut self) {
         let registry_lock = crate::registry::get_registry();
-        let registry = match registry_lock.read() {
-            Ok(r) => r,
-            Err(_) => return,
-        };
+        let Ok(registry) = registry_lock.read() else { return; };
 
         let active_peers = registry.active_peers();
         self.tunnels.retain(|key, _| active_peers.contains_key(key));
@@ -89,6 +88,9 @@ impl BgpRouter {
     }
 
     /// Processes an incoming packet for a specific peer tunnel.
+    ///
+    /// # Errors
+    /// Returns an error if no tunnel is registered for `peer_public_key` or decryption fails.
     pub fn handle_packet(&mut self, peer_public_key: &[u8; 32], packet: &[u8], out_buf: &mut [u8]) -> Result<Vec<u8>, String> {
         let tunnel = self.tunnels.get_mut(peer_public_key)
             .ok_or_else(|| "Peer tunnel not registered".to_string())?;
@@ -104,6 +106,9 @@ impl BgpRouter {
     }
 
     /// Encapsulates data to be sent to a specific peer tunnel.
+    ///
+    /// # Errors
+    /// Returns an error if no tunnel is registered for `peer_public_key` or encryption fails.
     pub fn send_data(&mut self, peer_public_key: &[u8; 32], data: &[u8], out_buf: &mut [u8]) -> Result<Vec<u8>, String> {
         let tunnel = self.tunnels.get_mut(peer_public_key)
             .ok_or_else(|| "Peer tunnel not registered".to_string())?;

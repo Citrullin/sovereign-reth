@@ -14,6 +14,7 @@ pub struct SessionKey {
 impl SessionKey {
     /// Checks if the session key is authorized at the given timestamp.
     /// Expiry is typically 24h.
+    #[must_use]
     pub fn is_authorized(&self, current_timestamp: u64) -> bool {
         current_timestamp <= self.expires_at
     }

@@ -1,8 +1,8 @@
 //! ZKP verification and federated identity provider modules.
 //!
 //! Provides the core abstraction for verifying identity credentials
-//! across SIWE/Authentik, NextERP, NextCloud, and physical NFC hardware,
-//! supporting OIDC SIWE Authentik relay mappings compatible with SpruceID's siwe-oidc.
+//! across SIWE/Authentik, `NextERP`, `NextCloud`, and physical NFC hardware,
+//! supporting `OIDC` SIWE Authentik relay mappings compatible with `SpruceID`'s `siwe-oidc`.
 
 /// A structured Zero-Knowledge Proof payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,21 +64,21 @@ impl IdentityProvider for AuthentikZkpAuth {
 }
 
 
-/// NextERP (ERPNext) identity provider utilizing the Authentik OIDC SIWE relay.
+/// `NextERP` (`ERPNext`) identity provider utilizing the Authentik `OIDC` SIWE relay.
 #[derive(Debug, Default, Clone)]
 pub struct NextErpAuth {
     /// The expected tenant or system ID for verification.
     pub tenant_id: String,
-    /// The Authentik OIDC SIWE relay server URL.
+    /// The Authentik `OIDC` SIWE relay server URL.
     pub relay_server: String,
 }
 
-/// NextERP authentication payload.
+/// `NextERP` authentication payload.
 #[derive(Debug, Clone)]
 pub struct NextErpCredentials {
     /// The employee/user DID.
     pub user_did: String,
-    /// A cryptographic assertion/signature from the Authentik OIDC relay server.
+    /// A cryptographic assertion/signature from the Authentik `OIDC` relay server.
     pub authentik_relay_signature: Vec<u8>,
     /// The mapped internal user email or ID.
     pub internal_user_email: String,
@@ -113,16 +113,16 @@ impl IdentityProvider for NextErpAuth {
     }
 }
 
-/// NextCloud identity provider utilizing the Authentik OIDC SIWE relay.
+/// `NextCloud` identity provider utilizing the Authentik `OIDC` SIWE relay.
 #[derive(Debug, Default, Clone)]
 pub struct NextCloudAuth {
-    /// The expected NextCloud instance URL.
+    /// The expected `NextCloud` instance URL.
     pub instance_url: String,
-    /// The Authentik OIDC SIWE relay server URL.
+    /// The Authentik `OIDC` SIWE relay server URL.
     pub relay_server: String,
 }
 
-/// NextCloud authentication payload.
+/// `NextCloud` authentication payload.
 #[derive(Debug, Clone)]
 pub struct NextCloudCredentials {
     /// The user DID.
@@ -185,9 +185,13 @@ impl IdentityProvider for NfcTokenAuth {
             return Err("NFC hardware signature verification failed");
         }
 
-        let card_hex: String = credentials.card_uid.iter().map(|b| format!("{:02x}", b)).collect();
+        let mut card_hex = String::with_capacity(credentials.card_uid.len() * 2);
+        for &b in &credentials.card_uid {
+            use std::fmt::Write as _;
+            let _ = write!(card_hex, "{b:02x}");
+        }
         Ok(InternalIdentityMapping {
-            internal_user_id: format!("nfc_card_{}", card_hex),
+            internal_user_id: format!("nfc_card_{card_hex}"),
             identity_server: "NFC_Reader".to_string(),
         })
     }

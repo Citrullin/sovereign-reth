@@ -8,6 +8,7 @@ pub struct SgxAttestationProvider;
 
 impl SgxAttestationProvider {
     /// Creates a new SGX attestation provider.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

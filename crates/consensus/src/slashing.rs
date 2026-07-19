@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use std::collections::HashMap;
 
-/// ReputationSlash handler and TinyMeritRank rules.
+/// `ReputationSlash` handler and `TinyMeritRank` rules.
 #[derive(Debug, Default)]
 pub struct SlashingManager {
     /// Current merit rank of validators.
@@ -11,7 +11,8 @@ pub struct SlashingManager {
 }
 
 impl SlashingManager {
-    /// Creates a new SlashingManager.
+    /// Creates a new `SlashingManager`.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             merit_rank: HashMap::new(),
@@ -26,7 +27,7 @@ impl SlashingManager {
         }
     }
 
-    /// Applies TinyMeritRank decay rules over an epoch.
+    /// Applies `TinyMeritRank` decay rules over an epoch.
     pub fn decay(&mut self, decay_factor: u64) {
         for rank in self.merit_rank.values_mut() {
             *rank = rank.saturating_sub(decay_factor);
@@ -34,6 +35,7 @@ impl SlashingManager {
     }
 
     /// Checks if a validator is still in the allowed sequencers set based on threshold.
+    #[must_use]
     pub fn is_allowed_sequencer(&self, address: &Address, threshold: u64) -> bool {
         self.merit_rank.get(address).copied().unwrap_or(0) >= threshold
     }

@@ -1,7 +1,8 @@
-//! MetaLex Borg-Core Integration
+//! `MetaLex` Borg-Core Integration
 //! Implements compact, legally binding on-chain organizational contracts (Borgs)
 //! bound to did:peer documents with Validator Reality Check verification.
 
+use alloy_primitives::Bytes;
 use std::collections::HashMap;
 
 /// Borg Organization representation.
@@ -23,7 +24,7 @@ pub struct RealityAudit {
     /// Active epoch of the validation.
     pub epoch: u64,
     /// Validator public keys that signed the off-chain reality validation.
-    pub validator_signatures: Vec<Vec<u8>>,
+    pub validator_signatures: Vec<Bytes>,
 }
 
 /// Metalex execution manager.
@@ -35,6 +36,7 @@ pub struct MetalexManager {
 
 impl MetalexManager {
     /// Creates a new Metalex Manager.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -44,6 +46,9 @@ impl MetalexManager {
     /// Requires:
     /// - At least a threshold of validator signatures (Reality Audit) confirming real-world legality.
     /// - Authorized signatures if updating an existing organization.
+    ///
+    /// # Errors
+    /// Returns an error if there are insufficient validator signatures.
     pub fn register_or_update_org(
         &mut self,
         org: BorgOrganization,
@@ -90,7 +95,7 @@ mod tests {
         // Attempt with sufficient signatures (should pass)
         let success_audit = RealityAudit {
             epoch: 1,
-            validator_signatures: vec![vec![1, 2, 3], vec![4, 5, 6]],
+            validator_signatures: vec![Bytes::from_static(&[1, 2, 3]), Bytes::from_static(&[4, 5, 6])],
         };
         let res_success = manager.register_or_update_org(org, &success_audit, 2);
         assert!(res_success.is_ok());

@@ -8,11 +8,15 @@ use alloy_primitives::keccak256;
 
 /// Represents a Snow subset election state.
 pub struct SnowSubsetElection {
+    /// The currently elected subset of validators.
     pub current_subset: HashSet<Address>,
+    /// The manifold ID targeted by this election.
     pub manifold_id: u64,
 }
 
 impl SnowSubsetElection {
+    /// Creates a new `SnowSubsetElection` helper.
+    #[must_use]
     pub fn new(manifold_id: u64) -> Self {
         Self {
             current_subset: HashSet::new(),
@@ -22,6 +26,9 @@ impl SnowSubsetElection {
 
     /// Triggers an election based on the given pool of routable validators.
     /// Uses a VRF-style deterministic sort based on epoch to sample the subset.
+    ///
+    /// # Errors
+    /// Returns an error if the pool of routable validators is empty.
     pub fn trigger_election(&mut self, routable_validators: &HashSet<Address>, epoch: u64, subset_size: usize) -> Result<(), &'static str> {
         if routable_validators.is_empty() {
             self.current_subset.clear();

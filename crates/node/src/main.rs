@@ -14,7 +14,6 @@ use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_node_builder::components::NoopConsensusBuilder;
 use reth_node_core::args::DefaultEngineValues;
 use reth_primitives_traits::AlloyBlockHeader;
-use std::env;
 use std::future::Future;
 use tracing::{debug, info};
 
@@ -40,7 +39,7 @@ pub struct SovereignArgs {
     #[arg(long)]
     pub delegation_proof: Option<std::path::PathBuf>,
 
-    /// TinyMeritRank reputation threshold for admission
+    /// `TinyMeritRank` reputation threshold for admission
     #[arg(long, default_value_t = 0.0)]
     pub merit_threshold: f64,
 }
@@ -58,6 +57,7 @@ impl Default for SovereignArgs {
 }
 
 /// Helper to determine the TEE attestation action based on mode.
+#[must_use]
 fn get_tee_attestation_action(tee_mode: &str, ephemeral_key: &str, block_number: u64) -> String {
     match tee_mode {
         "sgx" => format!("sgx:block:{block_number}:key:{ephemeral_key}"),
@@ -74,11 +74,15 @@ pub struct SettlementRelayer {
 
 impl SettlementRelayer {
     /// Creates a new Settlement Relayer.
+    #[must_use]
     pub fn new(safe_address: alloy_primitives::Address) -> Self {
         Self { safe_address }
     }
 
     /// Submits state diff commitment to the Gnosis Safe.
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP request fails.
     pub async fn submit_intent(&self, state_diff: &[u8]) -> eyre::Result<alloy_primitives::B256> {
         use tiny_keccak::{Hasher, Keccak};
         let mut hasher = Keccak::v256();
@@ -110,6 +114,7 @@ impl SettlementRelayer {
 }
 
 /// Execution Extension (`ExEx`) for Pluggable TEE Proving & DA Mesh Emission
+#[allow(clippy::unused_async)]
 async fn sovereign_exex<N: FullNodeComponents>(
     mut ctx: ExExContext<N>,
     args: SovereignArgs,
@@ -118,14 +123,11 @@ async fn sovereign_exex<N: FullNodeComponents>(
     let relayer = SettlementRelayer::new(alloy_primitives::Address::repeat_byte(0x99));
 
     Ok(async move {
-        info!("Sovereign Pluggable TEE ExEx started! Mode: {}", tee_mode);
+        info!("Sovereign Pluggable TEE ExEx started! Mode: {tee_mode}");
 
         // Zero-KMS: Generate ephemeral ECDSA key in-memory on boot
         let ephemeral_key = "0xEphemeralPubKeyMock42";
-        info!(
-            "Zero-KMS: Ephemeral in-memory key generated: {}",
-            ephemeral_key
-        );
+        info!("Zero-KMS: Ephemeral in-memory key generated: {ephemeral_key}");
 
         while let Some(notification) = ctx.notifications.next().await {
             let notification = notification?;
@@ -137,32 +139,20 @@ async fn sovereign_exex<N: FullNodeComponents>(
             if let Some(committed_chain) = notification.committed_chain() {
                 let tip = committed_chain.tip();
 
-                info!(
-                    "Block #{} executed. Generating TEE Attestation...",
-                    tip.number()
-                );
+                info!("Block #{} executed. Generating TEE Attestation...", tip.number());
 
                 let action = get_tee_attestation_action(tee_mode.as_str(), ephemeral_key, tip.number());
                 if action.starts_with("sgx:") {
-                    debug!(
-                        "Requesting Gramine SGX Quote for block #{}...",
-                        tip.number()
-                    );
-                    debug!("SGX Quote includes ephemeral key [{}] in report_data. DEBUG bit (0x02) is unset.", ephemeral_key);
+                    debug!("Requesting Gramine SGX Quote for block #{}...", tip.number());
+                    debug!("SGX Quote includes ephemeral key [{ephemeral_key}] in report_data.");
                 } else if action.starts_with("nitro:") {
-                    debug!("Requesting AWS Nitro Enclave NSM attestation document for block #{}...", tip.number());
-                    debug!(
-                        "Nitro Doc includes ephemeral key [{}] in user_data.",
-                        ephemeral_key
-                    );
+                    debug!("Requesting AWS Nitro Enclave NSM attestation for block #{}...", tip.number());
+                    debug!("Nitro Doc includes ephemeral key [{ephemeral_key}] in user_data.");
                 } else {
                     debug!("Running natively. No TEE attestation generated.");
                 }
 
-                debug!(
-                    "Emitting state diffs for block #{} to local DA mesh...",
-                    tip.number()
-                );
+                debug!("Emitting state diffs for block #{} to local DA mesh...", tip.number());
 
                 // Relayer submits the block intent
                 let mock_state_diff = vec![1, 2, 3, 4];
@@ -176,12 +166,12 @@ async fn sovereign_exex<N: FullNodeComponents>(
 }
 
 
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
-    if env::var_os("RUST_BACKTRACE").is_none() {
-        unsafe { env::set_var("RUST_BACKTRACE", "1") };
-    }
+    // RUST_BACKTRACE can be set externally: `RUST_BACKTRACE=1 sovereign-reth`
+    // Avoid unsafe env::set_var which is unsound in multi-threaded contexts.
 
     // Enable Parallel EVM (Block-STM) execution natively
     let _ = DefaultEngineValues::default()
@@ -283,7 +273,10 @@ mod tests {
         };
         let audit = RealityAudit {
             epoch: 1,
-            validator_signatures: vec![vec![1, 2], vec![3, 4]], // threshold met
+            validator_signatures: vec![
+                alloy_primitives::Bytes::from_static(&[1, 2]),
+                alloy_primitives::Bytes::from_static(&[3, 4]),
+            ], // threshold met
         };
         assert!(metalex_manager.register_or_update_org(org, &audit, 2).is_ok());
 

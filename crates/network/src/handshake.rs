@@ -15,16 +15,18 @@ impl Drop for KeyDeriver {
 
 impl KeyDeriver {
     /// Creates a new key deriver from a 32-byte seed.
+    #[must_use]
     pub fn new(master_seed: [u8; 32]) -> Self {
         Self { master_seed }
     }
 
-    /// Derives a Curve25519 keypair for WireGuard.
+    /// Derives a Curve25519 keypair for `WireGuard`.
+    #[must_use]
     pub fn derive_curve25519(&self) -> ([u8; 32], [u8; 32]) {
         let mut seed = [0u8; 42];
         seed[..10].copy_from_slice(b"curve25519");
         seed[10..].copy_from_slice(&self.master_seed);
-        let priv_bytes = keccak256(&seed).0;
+        let priv_bytes = keccak256(seed).0;
         let local_priv = StaticSecret::from(priv_bytes);
         let local_pub = PublicKey::from(&local_priv);
         let pub_bytes = *local_pub.as_bytes();
@@ -32,28 +34,30 @@ impl KeyDeriver {
     }
 
     /// Derives an Ed25519 keypair for standard signing.
+    #[must_use]
     pub fn derive_ed25519(&self) -> ([u8; 32], [u8; 32]) {
         let mut seed = [0u8; 39];
         seed[..7].copy_from_slice(b"ed25519");
         seed[7..].copy_from_slice(&self.master_seed);
-        let priv_bytes = keccak256(&seed).0;
+        let priv_bytes = keccak256(seed).0;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&priv_bytes);
         let verifying_key = signing_key.verifying_key();
         (priv_bytes, verifying_key.to_bytes())
     }
 
     /// Derives a secp256k1 keypair for EVM compat.
+    #[must_use]
     pub fn derive_secp256k1(&self) -> ([u8; 32], [u8; 33]) {
         let mut seed = [0u8; 41];
         seed[..9].copy_from_slice(b"secp256k1");
         seed[9..].copy_from_slice(&self.master_seed);
-        let mut priv_bytes = keccak256(&seed).0;
+        let mut priv_bytes = keccak256(seed).0;
         
         let signing_key = loop {
             if let Ok(key) = k256::ecdsa::SigningKey::from_bytes(&priv_bytes.into()) {
                 break key;
             }
-            priv_bytes = keccak256(&priv_bytes).0;
+            priv_bytes = keccak256(priv_bytes).0;
         };
 
         let verifying_key = signing_key.verifying_key();
@@ -66,14 +70,15 @@ impl KeyDeriver {
 
 /// Zero-configuration mesh handshaker that processes NFC taps to establish peering.
 pub struct ZeroConfigMesh {
-    /// WireGuard manager to control the interfaces.
+    /// `WireGuard` manager to control the interfaces.
     pub wg_manager: WireguardManager,
     /// List of actively peered DIDs.
     pub peered_dids: Vec<String>,
 }
 
 impl ZeroConfigMesh {
-    /// Creates a new ZeroConfigMesh instance.
+    /// Creates a new `ZeroConfigMesh` instance.
+    #[must_use]
     pub fn new(interface_name: &str) -> Self {
         Self {
             wg_manager: WireguardManager::new(interface_name),
@@ -81,8 +86,11 @@ impl ZeroConfigMesh {
         }
     }
 
-    /// Automatically registers a peer and establishes a WireGuard interface configuration
+    /// Automatically registers a peer and establishes a `WireGuard` interface configuration
     /// upon receiving an NFC credentials handshake exchange.
+    ///
+    /// # Errors
+    /// Returns an error if the signature credentials verification fails or if peering setup fails.
     pub fn handle_nfc_handshake(
         &mut self,
         did: &str,

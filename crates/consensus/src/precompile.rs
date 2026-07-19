@@ -76,6 +76,8 @@ pub const SELECTOR_ENDORSE: [u8; 4] = [0xe3, 0x9f, 0xa2, 0x19];
 pub const SELECTOR_REGISTER_SGX: [u8; 4] = [0xfd, 0x92, 0xac, 0x81];
 /// Selector for registering a supported manifold route.
 pub const SELECTOR_REGISTER_MANIFOLD: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
+/// Selector for submitting a KZG PageRank vector commitment.
+pub const SELECTOR_SUBMIT_COMMITMENT: [u8; 4] = [0xc1, 0xc2, 0xc3, 0xc4];
 
 /// Registry Precompile (`0xfe`) for managing node enrollment and TinyMeritRank.
 pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'static str> {
@@ -129,6 +131,23 @@ pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'
             }
             let target_manifold_id = u64::from_be_bytes(input[60..68].try_into().unwrap());
             registry.register_supported_manifold(&candidate_did, target_manifold_id)?;
+        }
+        SELECTOR_SUBMIT_COMMITMENT => {
+            let candidate_did = decode_abi_string(input, 4)?;
+            // selector(4) + string offset(32) + ... + commitment(48) + proof(48) + y(32)
+            // But let's just extract them from the end.
+            if input.len() < 132 {
+                return Err("Input too short for submit commitment");
+            }
+            let len = input.len();
+            let mut commitment = [0u8; 48];
+            commitment.copy_from_slice(&input[len - 128 .. len - 80]);
+            let mut proof = [0u8; 48];
+            proof.copy_from_slice(&input[len - 80 .. len - 32]);
+            let mut y = [0u8; 32];
+            y.copy_from_slice(&input[len - 32 .. len]);
+
+            registry.submit_commitment(caller, candidate_did, commitment, proof, y)?;
         }
         _ => return Err("Invalid registry selector"),
     }
@@ -202,7 +221,9 @@ mod tests {
         let reg_lock = crate::registry::get_registry();
         {
             let mut reg = reg_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::new();
             reg.manifold_quorum_threshold = 0;
+            
             let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
             reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
             reg.register_supported_manifold(&mock_did, 42).unwrap();
@@ -313,6 +334,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_registry_call() {
+        {
+            let mut reg = crate::registry::get_registry().write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::new();
+        }
         println!("TEST DEBUG: starting test_execute_registry_call");
         let genesis_seed = Address::repeat_byte(0x99);
         
@@ -469,15 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn test_manifold_routing_quorum() {
+    fn test_registry_mesh_quorum() {
         let reg_lock = crate::registry::get_registry();
         let mut reg = reg_lock.write().unwrap();
+        *reg = crate::registry::ValidatorRegistry::new();
+        reg.manifold_quorum_threshold = 2; // Needs 2
         
-        reg.manifold_quorum_threshold = 2; // Set small quorum for test
-        let manifold_id = 1337;
-        
-        // Setup 2 active validators using valid DIDs
-        let did1 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2do1", false);
+        let manifold_id = 99;
+        let did1 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doJ", false);
         let did2 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2do2", false);
         reg.propose_validator(Address::repeat_byte(0x99), did1.clone()).unwrap();
         reg.propose_validator(Address::repeat_byte(0x99), did2.clone()).unwrap();
@@ -568,5 +592,67 @@ mod tests {
         assert!(!courier.check_funding_and_suspend());
         assert!(!courier.is_suspended);
     }
-}
+    #[test]
+    fn test_publishing_window_enforcement() {
+        let reg_lock = crate::registry::get_registry();
+        let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
+        
+        {
+            let mut reg = reg_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::new();
+            reg.epoch_length = 1000;
+            reg.publishing_window = 100;
+            reg.current_block = 50; // Within window
+            reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
+            reg.reputation.insert(mock_did.clone(), 1.0); // Required for index
+        }
+        
+        let caller = Address::repeat_byte(0xaa);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&SELECTOR_SUBMIT_COMMITMENT);
+        // string offset = 32 (encoded in 32 bytes)
+        let mut offset = [0u8; 32];
+        offset[31] = 32;
+        payload.extend_from_slice(&offset);
+        
+        // string length (encoded in 32 bytes)
+        let mut len_bytes = [0u8; 32];
+        len_bytes[31] = mock_did.len() as u8; // Assume < 255
+        payload.extend_from_slice(&len_bytes);
+        
+        payload.extend_from_slice(mock_did.as_bytes());
+        // Pad for string
+        let pad = 32 - (mock_did.len() % 32);
+        if pad < 32 {
+            payload.extend(vec![0u8; pad]);
+        }
+        
+        // Commitment + Proof + Y
+        let commit = [0u8; 48];
+        let proof = [0u8; 48];
+        let y = [0u8; 32];
+        
+        // Pad to get the exact lengths as expected.
+        // wait, the parsing extracts them from the very end. 48+48+32 = 128 bytes.
+        // So we just append them.
+        payload.extend_from_slice(&commit);
+        payload.extend_from_slice(&proof);
+        payload.extend_from_slice(&y);
+        
+        // Window open
+        let res = execute_registry_call(caller, &Bytes::from(payload.clone()));
+        // Fails at KZG verification, NOT at window check
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "KZG verification computation failed");
 
+        // Window closed
+        {
+            let mut reg = reg_lock.write().unwrap();
+            reg.current_block = 150; // Outside window
+        }
+        
+        let res2 = execute_registry_call(caller, &Bytes::from(payload));
+        assert!(res2.is_err());
+        assert_eq!(res2.unwrap_err(), "Not within the epoch publishing window");
+    }
+}

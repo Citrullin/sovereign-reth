@@ -24,15 +24,23 @@ pub struct ValidatorRegistry {
     /// The seeds (bootstrap roots) of trust.
     seeds: HashSet<String>,
     /// Directed edges: u_did -> (v_did, weight) representing endorsements.
-    endorsements: HashMap<String, HashMap<String, f64>>,
-    /// Computed reputation scores for each DID.
-    reputation: HashMap<String, f64>,
-    /// Minimum reputation required for HardwareTEE validators if enclave is suspected to be compromised.
+    pub endorsements: HashMap<String, HashMap<String, f64>>,
+    /// Global reputation mapping: DID -> Score
+    pub reputation: HashMap<String, f64>,
+    /// Hardware enclave threshold (if 0.0, bypassed)
     pub sgx_reputation_threshold: f64,
     /// Mapping of validator DID -> Set of Manifold IDs they are willing to route to.
     supported_manifolds: HashMap<String, HashSet<u64>>,
-    /// Configurable minimum validators required to activate a manifold route.
+    /// Threshold to enforce minimum required validators for organic manifold routing
     pub manifold_quorum_threshold: usize,
+    /// Epoch length in blocks (default 30 days = ~1_296_000 blocks at 2s)
+    pub epoch_length: u64,
+    /// Publishing window length in blocks (default ~10 min = 300 blocks at 2s)
+    pub publishing_window: u64,
+    /// Current block number tracked by the consensus engine
+    pub current_block: u64,
+    /// Store KZG commitments submitted by validators: DID -> 48-byte commitment
+    pub commitments: HashMap<String, [u8; 48]>,
 }
 
 impl Default for ValidatorRegistry {
@@ -42,18 +50,22 @@ impl Default for ValidatorRegistry {
 }
 
 impl ValidatorRegistry {
-    /// Creates a new validator registry and bootstraps with default seeds.
+    /// Creates a new validator registry and bootstraps with default genesis seeds.
     pub fn new() -> Self {
         let mut registry = Self {
             validators: HashMap::new(),
             peer_keys: HashMap::new(),
             address_to_did: HashMap::new(),
-            seeds: HashSet::new(),
             endorsements: HashMap::new(),
-            reputation: HashMap::new(),
-            sgx_reputation_threshold: 0.0,
             supported_manifolds: HashMap::new(),
-            manifold_quorum_threshold: 500, // Default configurable threshold
+            seeds: HashSet::new(),
+            reputation: HashMap::new(),
+            sgx_reputation_threshold: 0.0, // Disabled by default
+            manifold_quorum_threshold: 500, // Organic routing threshold minimum 
+            epoch_length: 1_296_000,
+            publishing_window: 300,
+            current_block: 0,
+            commitments: HashMap::new(),
         };
 
         // Bootstrap with genesis seeds
@@ -77,6 +89,42 @@ impl ValidatorRegistry {
 
         registry.compute_pagerank();
         registry
+    }
+
+    pub fn submit_commitment(
+        &mut self,
+        caller: Address,
+        did: String,
+        commitment: [u8; 48],
+        proof: [u8; 48],
+        y: [u8; 32],
+    ) -> Result<(), &'static str> {
+        if self.get_did_by_address(&caller).as_deref() != Some(did.as_str()) {
+            return Err("Caller does not own this DID");
+        }
+
+        if self.current_block % self.epoch_length > self.publishing_window {
+            return Err("Not within the epoch publishing window");
+        }
+
+        let mut sorted_dids: Vec<_> = self.reputation.keys().collect();
+        sorted_dids.sort();
+        let index = sorted_dids.iter().position(|&d| d == &did).ok_or("DID not found in reputation map")?;
+
+        use c_kzg::{Bytes32, Bytes48};
+        let c_bytes = Bytes48::from_bytes(&commitment).map_err(|_| "Invalid commitment bytes")?;
+        let p_bytes = Bytes48::from_bytes(&proof).map_err(|_| "Invalid proof bytes")?;
+        let y_bytes = Bytes32::from_bytes(&y).map_err(|_| "Invalid y bytes")?;
+
+        let is_valid = crate::kzg::PageRankKzg::verify_proof(&c_bytes, index, &y_bytes, &p_bytes)
+            .map_err(|_| "KZG verification computation failed")?;
+
+        if !is_valid {
+            return Err("Invalid KZG polynomial evaluation proof");
+        }
+
+        self.commitments.insert(did, commitment);
+        Ok(())
     }
 
     /// Resolves EVM Address and WireGuard key from DID and registers as TEE validator.
@@ -290,7 +338,105 @@ impl ValidatorRegistry {
             pr = next_pr;
         }
 
+        // Apply Connectivity Decay (Phase 6)
+        // For each node j, calculate max node-disjoint paths from any seed to j.
+        // If paths <= 2, apply a 10% penalty.
+        let graph: HashMap<String, Vec<String>> = self.endorsements.iter()
+            .map(|(u, targets)| (u.clone(), targets.keys().cloned().collect()))
+            .collect();
+
+        for node in &nodes {
+            if self.seeds.contains(node) {
+                continue; // Seeds are not penalized
+            }
+            let paths = Self::max_node_disjoint_paths(&self.seeds, node, &graph);
+            if paths <= 2 {
+                if let Some(score) = pr.get_mut(node) {
+                    *score *= 0.90; // 10% penalty
+                }
+            }
+        }
+
         self.reputation = pr;
+    }
+
+    /// Computes max node-disjoint paths from a set of sources to a target using Edmonds-Karp on a node-split graph.
+    fn max_node_disjoint_paths(sources: &HashSet<String>, target: &String, graph: &HashMap<String, Vec<String>>) -> usize {
+        let mut capacity: HashMap<(String, String), i32> = HashMap::new();
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        
+        let mut add_edge = |u: String, v: String, cap: i32| {
+            adj.entry(u.clone()).or_default().push(v.clone());
+            adj.entry(v.clone()).or_default().push(u.clone()); // reverse edge for residual graph
+            capacity.insert((u.clone(), v.clone()), cap);
+            capacity.insert((v, u), 0);
+        };
+
+        for (u, neighbors) in graph {
+            add_edge(format!("{}_in", u), format!("{}_out", u), 1);
+            for v in neighbors {
+                add_edge(format!("{}_out", u), format!("{}_in", v), 10000);
+            }
+        }
+        
+        let super_source = "SUPER_SOURCE".to_string();
+        for s in sources {
+            add_edge(super_source.clone(), format!("{}_in", s), 10000);
+        }
+        let target_in = format!("{}_in", target);
+        
+        let mut max_flow = 0;
+        let mut flow: HashMap<(String, String), i32> = HashMap::new();
+
+        loop {
+            let mut parent: HashMap<String, String> = HashMap::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(super_source.clone());
+            parent.insert(super_source.clone(), super_source.clone());
+            
+            let mut found = false;
+            while let Some(u) = queue.pop_front() {
+                if u == target_in {
+                    found = true;
+                    break;
+                }
+                if let Some(neighbors) = adj.get(&u) {
+                    for v in neighbors {
+                        let cap = *capacity.get(&(u.clone(), v.clone())).unwrap_or(&0);
+                        let f = *flow.get(&(u.clone(), v.clone())).unwrap_or(&0);
+                        if !parent.contains_key(v) && cap - f > 0 {
+                            parent.insert(v.clone(), u.clone());
+                            queue.push_back(v.clone());
+                        }
+                    }
+                }
+            }
+            
+            if !found {
+                break;
+            }
+            
+            let mut path_flow = i32::MAX;
+            let mut curr = target_in.clone();
+            while curr != super_source {
+                let p = parent.get(&curr).unwrap();
+                let cap = *capacity.get(&(p.clone(), curr.clone())).unwrap();
+                let f = *flow.get(&(p.clone(), curr.clone())).unwrap_or(&0);
+                path_flow = path_flow.min(cap - f);
+                curr = p.clone();
+            }
+            
+            let mut curr = target_in.clone();
+            while curr != super_source {
+                let p = parent.get(&curr).unwrap();
+                *flow.entry((p.clone(), curr.clone())).or_insert(0) += path_flow;
+                *flow.entry((curr.clone(), p.clone())).or_insert(0) -= path_flow;
+                curr = p.clone();
+            }
+            max_flow += path_flow;
+        }
+        
+        max_flow as usize
     }
 
     /// Promotes social validators if their reputation exceeds the threshold (0.05).
@@ -362,5 +508,47 @@ pub static VALIDATOR_REGISTRY: OnceLock<RwLock<ValidatorRegistry>> = OnceLock::n
 /// Returns a static reference to the shared thread-safe validator registry.
 pub fn get_registry() -> &'static RwLock<ValidatorRegistry> {
     VALIDATOR_REGISTRY.get_or_init(|| RwLock::new(ValidatorRegistry::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connectivity_decay() {
+        let mut registry = ValidatorRegistry::new();
+        registry.seeds.clear();
+        registry.validators.clear();
+        registry.endorsements.clear();
+        
+        let seed = "did:peer:SEED".to_string();
+        registry.seeds.insert(seed.clone());
+        
+        let node_a = "did:peer:A".to_string(); 
+        let node_b = "did:peer:B".to_string(); 
+        
+        let mut seed_end = HashMap::new();
+        seed_end.insert("did:peer:P1".to_string(), 1.0);
+        seed_end.insert("did:peer:P2".to_string(), 1.0);
+        seed_end.insert("did:peer:P3".to_string(), 1.0);
+        seed_end.insert("did:peer:P4".to_string(), 1.0);
+        registry.endorsements.insert(seed.clone(), seed_end);
+
+        registry.endorsements.insert("did:peer:P1".to_string(), { let mut m = HashMap::new(); m.insert(node_a.clone(), 1.0); m });
+        registry.endorsements.insert("did:peer:P2".to_string(), { let mut m = HashMap::new(); m.insert(node_a.clone(), 1.0); m });
+        registry.endorsements.insert("did:peer:P3".to_string(), { let mut m = HashMap::new(); m.insert(node_a.clone(), 1.0); m });
+        
+        registry.endorsements.insert("did:peer:P4".to_string(), { let mut m = HashMap::new(); m.insert(node_b.clone(), 1.0); m });
+
+        registry.endorsements.insert(node_a.clone(), { let mut m = HashMap::new(); m.insert(node_a.clone(), 1.0); m });
+        registry.endorsements.insert(node_b.clone(), { let mut m = HashMap::new(); m.insert(node_b.clone(), 1.0); m });
+
+        registry.compute_pagerank();
+        
+        let rep_a = *registry.reputation.get(&node_a).unwrap_or(&0.0);
+        let rep_b = *registry.reputation.get(&node_b).unwrap_or(&0.0);
+        
+        assert!(rep_a > rep_b);
+    }
 }
 

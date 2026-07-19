@@ -16,5 +16,6 @@ pub mod slashing;
 pub mod parallel;
 pub mod subset_election;
 pub mod courier;
+pub mod kzg;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};

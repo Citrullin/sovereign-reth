@@ -550,5 +550,56 @@ mod tests {
         
         assert!(rep_a > rep_b);
     }
+
+    #[test]
+    fn test_cartel_slashing_scenario() {
+        let mut registry = ValidatorRegistry::new();
+        registry.reputation.insert("did:peer:A".to_string(), 1.0);
+        registry.reputation.insert("did:peer:B".to_string(), 1.0);
+        registry.reputation.insert("did:peer:C".to_string(), 1.0);
+
+        // A and B endorse each other mutually (cartel)
+        let mut end_a = HashMap::new();
+        end_a.insert("did:peer:B".to_string(), 1.0);
+        registry.endorsements.insert("did:peer:A".to_string(), end_a);
+
+        let mut end_b = HashMap::new();
+        end_b.insert("did:peer:A".to_string(), 1.0);
+        registry.endorsements.insert("did:peer:B".to_string(), end_b);
+
+        // C endorses D (no loop)
+        let mut end_c = HashMap::new();
+        end_c.insert("did:peer:D".to_string(), 1.0);
+        registry.endorsements.insert("did:peer:C".to_string(), end_c);
+
+        // Trigger cartel slashing
+        crate::slashing::SlashingManager::slash_cartels(&mut registry, 0.5);
+
+        // A and B should be slashed by 0.5
+        assert_eq!(*registry.reputation.get("did:peer:A").unwrap(), 0.5);
+        assert_eq!(*registry.reputation.get("did:peer:B").unwrap(), 0.5);
+        // C should not be slashed
+        assert_eq!(*registry.reputation.get("did:peer:C").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_epoch_rollover_slashing_scenario() {
+        let mut registry = ValidatorRegistry::new();
+        registry.reputation.insert("did:peer:A".to_string(), 1.0);
+        registry.reputation.insert("did:peer:B".to_string(), 1.0);
+
+        // Node A submits commitment
+        registry.commitments.insert("did:peer:A".to_string(), [0u8; 48]);
+
+        // Trigger missing commitment slashing
+        crate::slashing::SlashingManager::slash_missing_commitments(&mut registry, 0.4);
+
+        // Node A did submit, so reputation stays 1.0
+        assert_eq!(*registry.reputation.get("did:peer:A").unwrap(), 1.0);
+        // Node B missed, so reputation slashed by 0.4 -> 0.6
+        assert_eq!(*registry.reputation.get("did:peer:B").unwrap(), 0.6);
+        // Commitments list should be reset/cleared for the next epoch
+        assert!(registry.commitments.is_empty());
+    }
 }
 

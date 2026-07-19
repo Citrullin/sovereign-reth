@@ -37,7 +37,6 @@ impl SlashingManager {
     pub fn is_allowed_sequencer(&self, address: &Address, threshold: u64) -> bool {
         self.merit_rank.get(address).copied().unwrap_or(0) >= threshold
     }
-}
 
     /// Checks for cartel formation (nodes giving >20% of their endorsement weight to mutual endorsers)
     pub fn slash_cartels(registry: &mut crate::registry::ValidatorRegistry, slash_amount: f64) {
@@ -85,4 +84,5 @@ impl SlashingManager {
         // Reset commitments for the next epoch
         registry.commitments.clear();
     }
+}
 

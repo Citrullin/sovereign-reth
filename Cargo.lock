@@ -10819,8 +10819,10 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "boringtun",
+ "ed25519-dalek 3.0.0",
  "eyre",
  "futures",
+ "k256 0.14.0",
  "nmt-rs",
  "reth-chainspec",
  "reth-ethereum",
@@ -10854,6 +10856,10 @@ dependencies = [
 name = "sovereign-network"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "boringtun",
+ "ed25519-dalek 3.0.0",
+ "k256 0.14.0",
  "reed-solomon-erasure",
 ]
 

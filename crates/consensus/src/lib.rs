@@ -10,6 +10,7 @@ pub mod stateless;
 pub mod nmt;
 pub mod registry;
 pub mod bgp;
+/// Cross-manifold precompiles module.
 pub mod precompile;
 pub mod slashing;
 pub mod parallel;

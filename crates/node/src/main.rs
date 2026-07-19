@@ -17,6 +17,9 @@ use reth_primitives_traits::AlloyBlockHeader;
 use std::future::Future;
 use tracing::{debug, info};
 
+/// Node configuration module.
+pub mod config;
+
 use sovereign_consensus::SovereignPoolBuilder;
 use clap::Parser;
 
@@ -42,6 +45,10 @@ pub struct SovereignArgs {
     /// `TinyMeritRank` reputation threshold for admission
     #[arg(long, default_value_t = 0.0)]
     pub merit_threshold: f64,
+
+    /// Path to the TOML configuration file
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
 }
 
 impl Default for SovereignArgs {
@@ -52,6 +59,7 @@ impl Default for SovereignArgs {
             did_peer4: None,
             delegation_proof: None,
             merit_threshold: 0.0,
+            config: None,
         }
     }
 }
@@ -181,6 +189,23 @@ fn main() {
     if let Err(err) = Cli::<EthereumChainSpecParser, SovereignArgs>::parse().run(async move |builder, args| {
         info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.node_type, args.tee);
 
+        let mut static_cfg = sovereign_consensus::config::StaticConfig::default();
+        let mut dynamic_cfg = sovereign_consensus::config::DynamicConfig::default();
+        if let Some(cfg_path) = &args.config {
+            match config::NodeConfig::load_from_file(cfg_path) {
+                Ok(cfg) => {
+                    static_cfg = cfg.static_cfg;
+                    dynamic_cfg = cfg.dynamic_cfg;
+                    info!("Loaded configuration from {cfg_path:?}");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load configuration file {cfg_path:?}: {e}");
+                }
+            }
+        }
+        let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
+        let _ = sovereign_consensus::registry::init_registry(static_cfg, dynamic_cfg_arc);
+
         let handle = builder
             .with_types::<EthereumNode>()
             .with_components(
@@ -203,6 +228,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_toml_config_loading() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_config.toml");
+        let toml_content = r#"
+[static_cfg.pagerank]
+damping_factor = 0.95
+max_iterations = 100
+temporal_decay_gamma = 0.01
+temporal_decay_delta_r = 0.02
+
+[static_cfg.epoch]
+epoch_length = 500000
+publishing_window = 1000
+
+[static_cfg.das]
+required_samples = 32
+max_attempts = 500
+
+[dynamic_cfg]
+sgx_reputation_threshold = 0.5
+manifold_quorum_threshold = 100
+social_promotion_threshold = 0.1
+required_gas_threshold = "10000000000000000"
+metalex_validator_count_threshold = 5
+"#;
+        std::fs::write(&file_path, toml_content).unwrap();
+
+        let config = config::NodeConfig::load_from_file(&file_path).unwrap();
+        assert_eq!(config.static_cfg.pagerank.damping_factor, 0.95);
+        assert_eq!(config.static_cfg.pagerank.max_iterations, 100);
+        assert_eq!(config.static_cfg.pagerank.temporal_decay_gamma, 0.01);
+        assert_eq!(config.static_cfg.pagerank.temporal_decay_delta_r, 0.02);
+        assert_eq!(config.static_cfg.epoch.epoch_length, 500000);
+        assert_eq!(config.static_cfg.epoch.publishing_window, 1000);
+        assert_eq!(config.static_cfg.das.required_samples, 32);
+        assert_eq!(config.static_cfg.das.max_attempts, 500);
+
+        assert_eq!(config.dynamic_cfg.sgx_reputation_threshold, 0.5);
+        assert_eq!(config.dynamic_cfg.manifold_quorum_threshold, 100);
+        assert_eq!(config.dynamic_cfg.social_promotion_threshold, 0.1);
+        assert_eq!(config.dynamic_cfg.required_gas_threshold, alloy_primitives::U256::from(10000000000000000u64));
+        assert_eq!(config.dynamic_cfg.metalex_validator_count_threshold, 5);
+
+        let _ = std::fs::remove_file(file_path);
+    }
 
     #[test]
     fn test_get_tee_attestation_action() {
@@ -247,18 +319,37 @@ mod tests {
         use std::collections::HashMap;
 
         // 1. Peer Node A and Node B via simulated NFC tap
+        use ed25519_dalek::{SigningKey, Signer};
         let mut mesh = ZeroConfigMesh::new("wg0");
+
+        let seed = [2u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+
+        let mut codec_bytes = vec![0xed, 0x01];
+        codec_bytes.extend_from_slice(&verifying_key.to_bytes());
+        let multibase_str = format!("z{}", bs58::encode(codec_bytes).into_string());
+
+        let keys = vec![did_peer::DIDPeerCreateKeys {
+            type_: Some(did_peer::DIDPeerKeyType::Ed25519),
+            purpose: did_peer::DIDPeerKeys::Verification,
+            public_key_multibase: Some(multibase_str),
+        }];
+        let (node_a_did, _) = did_peer::DIDPeer::create_peer_did(&keys, None).unwrap();
+
+        let challenge = vec![0, 0, 1];
+        let sig = signing_key.sign(&challenge).to_bytes().to_vec();
+
         let creds = NfcCredentials {
             card_uid: vec![0x99, 0x88],
-            dynamic_signature: b"valid_nfc_sig_token".to_vec(),
-            challenge: vec![0, 0, 1],
+            dynamic_signature: sig,
+            challenge,
         };
-        let node_a_did = "did:peer:4:node_a";
-        assert!(mesh.handle_nfc_handshake(node_a_did, &creds, "192.168.1.100:51820").is_ok());
+        assert!(mesh.handle_nfc_handshake(&node_a_did, &creds, "192.168.1.100:51820").is_ok());
 
         // 2. Resolve a namespace for Node A
         let mut ns_registry = NamespaceRegistry::new();
-        assert!(ns_registry.register("nodea.sovereign".into(), node_a_did.into(), 10.0, 0));
+        assert!(ns_registry.register("nodea.sovereign".into(), node_a_did.clone(), 10.0, 0));
 
         // 3. Register Node A's MetaLex organization contract with a Reality Audit
         let mut metalex_manager = MetalexManager::new();
@@ -288,9 +379,9 @@ mod tests {
             id: "tx-777".to_string(),
             protocol_version: "4.0".to_string(),
         };
-        let response = relay.query_organization_state(node_a_did, &header).unwrap();
+        let response = relay.query_organization_state(&node_a_did, &header).unwrap();
         assert!(response.contains("0xEquityAddressNodeA"));
-        assert!(response.contains("signed:did:peer:4:did:peer:4:node_a"));
+        assert!(response.contains(&node_a_did));
     }
 
 }

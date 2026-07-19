@@ -102,3 +102,13 @@ mod tests {
         assert!(manager.orgs.contains_key("did:peer:4:sovereign_co"));
     }
 }
+
+use std::sync::{OnceLock, RwLock};
+
+/// Global static Metalex manager.
+pub static METALEX_MANAGER: OnceLock<RwLock<MetalexManager>> = OnceLock::new();
+
+/// Returns a static reference to the shared thread-safe Metalex manager.
+pub fn get_metalex_manager() -> &'static RwLock<MetalexManager> {
+    METALEX_MANAGER.get_or_init(|| RwLock::new(MetalexManager::new()))
+}

@@ -7,6 +7,8 @@
 
 /// Custom FCFS transaction ordering and pool builders.
 pub mod pool;
+/// Sovereign configurations.
+pub mod config;
 /// Stateless EVM execution/validation.
 pub mod stateless;
 /// Namespaced Merkle Trees for state-diff partitioning.

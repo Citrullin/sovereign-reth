@@ -42,3 +42,7 @@ sovereign-consensus = { workspace = true }
 sovereign-attestation = { workspace = true }
 sovereign-identity = { workspace = true }
 sovereign-network = { workspace = true }
+toml = { workspace = true }
+bs58 = { workspace = true }
+ed25519-dalek = { workspace = true }
+did-peer = { workspace = true }

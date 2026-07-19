@@ -24,8 +24,8 @@ pub struct BlindCourierService<R: RpcClient> {
     rpc_client: Arc<R>,
     /// Whether the service is currently suspended due to insufficient funds.
     pub is_suspended: bool,
-    /// Minimum ETH balance required to keep the service running.
-    pub required_gas_threshold: U256,
+    /// Dynamic, hot-reloadable configurations.
+    pub dynamic_cfg: std::sync::Arc<std::sync::RwLock<crate::config::DynamicConfig>>,
 }
 
 impl<R: RpcClient> BlindCourierService<R> {
@@ -33,7 +33,12 @@ impl<R: RpcClient> BlindCourierService<R> {
     ///
     /// # Errors
     /// Returns an error if the seed bytes are not a valid Secp256k1 scalar.
-    pub fn new(local_did: String, seed: &[u8; 32], rpc_client: Arc<R>) -> Result<Self, &'static str> {
+    pub fn new(
+        local_did: String,
+        seed: &[u8; 32],
+        rpc_client: Arc<R>,
+        dynamic_cfg: std::sync::Arc<std::sync::RwLock<crate::config::DynamicConfig>>,
+    ) -> Result<Self, &'static str> {
         let signing_key = SigningKey::from_slice(seed)
             .map_err(|_| "Invalid Secp256k1 seed: not a valid scalar")?;
         let verifying_key = signing_key.verifying_key();
@@ -47,8 +52,7 @@ impl<R: RpcClient> BlindCourierService<R> {
             local_paymaster_address,
             rpc_client,
             is_suspended: false,
-            // Assume 0.005 ETH required for blob gas
-            required_gas_threshold: U256::from(5_000_000_000_000_000u64),
+            dynamic_cfg,
         })
     }
 
@@ -57,7 +61,8 @@ impl<R: RpcClient> BlindCourierService<R> {
     /// Returns `true` if the service is (or just became) suspended.
     pub fn check_funding_and_suspend(&mut self) -> bool {
         let balance = self.rpc_client.get_balance(self.local_paymaster_address);
-        if balance < self.required_gas_threshold {
+        let required_gas_threshold = self.dynamic_cfg.read().unwrap().required_gas_threshold;
+        if balance < required_gas_threshold {
             if !self.is_suspended {
                 error!(
                     address = %self.local_paymaster_address,

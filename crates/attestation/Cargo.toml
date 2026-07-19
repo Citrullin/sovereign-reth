@@ -6,4 +6,5 @@ authors.workspace = true
 
 [dependencies]
 dcap-qvl = { workspace = true }
+scale = { workspace = true }
 

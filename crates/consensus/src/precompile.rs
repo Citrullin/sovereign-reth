@@ -76,6 +76,9 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
 /// The address of the validator registry precompile (0xfe...fe).
 pub const REGISTRY_PRECOMPILE_ADDRESS: Address = Address::repeat_byte(0xfe);
 
+/// The address of the MetaLex precompile (0xfd...fd).
+pub const METALEX_PRECOMPILE_ADDRESS: Address = Address::repeat_byte(0xfd);
+
 /// EVM selectors for registry calls.
 pub const SELECTOR_PROPOSE: [u8; 4] = [0x78, 0x9e, 0xf2, 0x39];
 /// Selector for endorsing a validator.
@@ -86,6 +89,152 @@ pub const SELECTOR_REGISTER_SGX: [u8; 4] = [0xfd, 0x92, 0xac, 0x81];
 pub const SELECTOR_REGISTER_MANIFOLD: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
 /// Selector for submitting a KZG `PageRank` vector commitment.
 pub const SELECTOR_SUBMIT_COMMITMENT: [u8; 4] = [0xc1, 0xc2, 0xc3, 0xc4];
+
+/// Selector for MetaLex organization registration or update.
+pub const SELECTOR_REGISTER_OR_UPDATE_ORG: [u8; 4] = [0xa9, 0xb8, 0xc7, 0xd6];
+
+/// MetaLex Precompile (`0xfd`) for managing legally-binding Borg organizations and reality audits.
+///
+/// # Errors
+/// Returns an error if the input layout is invalid, selector is unrecognized, or state updates fail.
+pub fn execute_metalex_call(_caller: Address, input: &Bytes) -> Result<Bytes, &'static str> {
+    if input.len() < 4 {
+        return Err("Input too short");
+    }
+
+    let selector: [u8; 4] = input[0..4].try_into().expect("length already checked");
+    if selector != SELECTOR_REGISTER_OR_UPDATE_ORG {
+        return Err("Invalid MetaLex selector");
+    }
+
+    // decode parameters
+    // Slot 0 (offset 4): did_peer offset pointer
+    // Slot 1 (offset 36): equity_token offset pointer
+    // Slot 2 (offset 68): agent_dids offset pointer
+    // Slot 3 (offset 100): agent_roles offset pointer
+    // Slot 4 (offset 132): validator_signatures offset pointer
+    let did_peer = decode_abi_string(input, 4)?;
+    let equity_token = decode_abi_string(input, 36)?;
+    let agent_dids = decode_abi_string_array(input, 68)?;
+    let agent_roles = decode_abi_string_array(input, 100)?;
+    let validator_signatures = decode_abi_bytes_array(input, 132)?;
+
+    if agent_dids.len() != agent_roles.len() {
+        return Err("Agent DIDs and Roles array length mismatch");
+    }
+
+    let mut agents = std::collections::HashMap::new();
+    for (d, r) in agent_dids.into_iter().zip(agent_roles.into_iter()) {
+        agents.insert(d, r);
+    }
+
+    let org = crate::metalex::BorgOrganization {
+        did_peer,
+        equity_token,
+        agents,
+        is_active: true,
+    };
+
+    let registry_lock = crate::registry::get_registry();
+    let registry = registry_lock.read().map_err(|_| "Failed to lock registry")?;
+    let threshold = registry.dynamic_cfg.read().unwrap().metalex_validator_count_threshold;
+
+    let audit = crate::metalex::RealityAudit {
+        epoch: registry.current_block / registry.static_cfg.epoch.epoch_length,
+        validator_signatures,
+    };
+
+    let metalex_lock = crate::metalex::get_metalex_manager();
+    let mut metalex = metalex_lock.write().map_err(|_| "Failed to lock MetalexManager")?;
+    metalex.register_or_update_org(org, &audit, threshold)?;
+
+    let mut output = vec![0u8; 32];
+    output[31] = 1;
+    Ok(Bytes::from(output))
+}
+
+fn decode_abi_string_array(input: &[u8], offset_idx: usize) -> Result<Vec<String>, &'static str> {
+    if input.len() < offset_idx + 32 {
+        return Err("Input too short for array offset");
+    }
+    let mut offset_bytes = [0u8; 8];
+    offset_bytes.copy_from_slice(&input[offset_idx + 24 .. offset_idx + 32]);
+    let array_offset = usize::try_from(u64::from_be_bytes(offset_bytes)).unwrap() + 4; // selector offset
+
+    if input.len() < array_offset + 32 {
+        return Err("Input too short for array length");
+    }
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&input[array_offset + 24 .. array_offset + 32]);
+    let array_len = usize::try_from(u64::from_be_bytes(len_bytes)).unwrap();
+
+    let mut result = Vec::with_capacity(array_len);
+    for i in 0..array_len {
+        let item_offset_ptr = array_offset + 32 + i * 32;
+        if input.len() < item_offset_ptr + 32 {
+            return Err("Input too short for array item offset pointer");
+        }
+        let mut item_offset_bytes = [0u8; 8];
+        item_offset_bytes.copy_from_slice(&input[item_offset_ptr + 24 .. item_offset_ptr + 32]);
+        let item_offset = usize::try_from(u64::from_be_bytes(item_offset_bytes)).unwrap() + array_offset + 32;
+
+        if input.len() < item_offset + 32 {
+            return Err("Input too short for array item length");
+        }
+        let mut item_len_bytes = [0u8; 8];
+        item_len_bytes.copy_from_slice(&input[item_offset + 24 .. item_offset + 32]);
+        let item_len = usize::try_from(u64::from_be_bytes(item_len_bytes)).unwrap();
+
+        if input.len() < item_offset + 32 + item_len {
+            return Err("Input too short for array item data");
+        }
+        let item_data = &input[item_offset + 32 .. item_offset + 32 + item_len];
+        let s = String::from_utf8(item_data.to_vec()).map_err(|_| "Invalid UTF-8 in array item")?;
+        result.push(s);
+    }
+    Ok(result)
+}
+
+fn decode_abi_bytes_array(input: &[u8], offset_idx: usize) -> Result<Vec<Bytes>, &'static str> {
+    if input.len() < offset_idx + 32 {
+        return Err("Input too short for array offset");
+    }
+    let mut offset_bytes = [0u8; 8];
+    offset_bytes.copy_from_slice(&input[offset_idx + 24 .. offset_idx + 32]);
+    let array_offset = usize::try_from(u64::from_be_bytes(offset_bytes)).unwrap() + 4; // selector offset
+
+    if input.len() < array_offset + 32 {
+        return Err("Input too short for array length");
+    }
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&input[array_offset + 24 .. array_offset + 32]);
+    let array_len = usize::try_from(u64::from_be_bytes(len_bytes)).unwrap();
+
+    let mut result = Vec::with_capacity(array_len);
+    for i in 0..array_len {
+        let item_offset_ptr = array_offset + 32 + i * 32;
+        if input.len() < item_offset_ptr + 32 {
+            return Err("Input too short for array item offset pointer");
+        }
+        let mut item_offset_bytes = [0u8; 8];
+        item_offset_bytes.copy_from_slice(&input[item_offset_ptr + 24 .. item_offset_ptr + 32]);
+        let item_offset = usize::try_from(u64::from_be_bytes(item_offset_bytes)).unwrap() + array_offset + 32;
+
+        if input.len() < item_offset + 32 {
+            return Err("Input too short for array item length");
+        }
+        let mut item_len_bytes = [0u8; 8];
+        item_len_bytes.copy_from_slice(&input[item_offset + 24 .. item_offset + 32]);
+        let item_len = usize::try_from(u64::from_be_bytes(item_len_bytes)).unwrap();
+
+        if input.len() < item_offset + 32 + item_len {
+            return Err("Input too short for array item data");
+        }
+        let item_data = &input[item_offset + 32 .. item_offset + 32 + item_len];
+        result.push(Bytes::from(item_data.to_vec()));
+    }
+    Ok(result)
+}
 
 /// Registry Precompile (`0xfe`) for managing node enrollment and `TinyMeritRank`.
 ///
@@ -238,8 +387,8 @@ mod tests {
         let reg_lock = crate::registry::get_registry();
         {
             let mut reg = reg_lock.write().unwrap();
-            *reg = crate::registry::ValidatorRegistry::new();
-            reg.manifold_quorum_threshold = 0;
+            *reg = crate::registry::ValidatorRegistry::default();
+            reg.dynamic_cfg.write().unwrap().manifold_quorum_threshold = 0;
             
             let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
             reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
@@ -354,7 +503,7 @@ mod tests {
     async fn test_execute_registry_call() {
         {
             let mut reg = crate::registry::get_registry().write().unwrap();
-            *reg = crate::registry::ValidatorRegistry::new();
+            *reg = crate::registry::ValidatorRegistry::default();
         }
 
         let genesis_seed = Address::repeat_byte(0x99);
@@ -472,8 +621,8 @@ mod tests {
 
         // Set threshold to 0.1
         {
-            let mut reg = reg_lock.write().unwrap();
-            reg.sgx_reputation_threshold = 0.1;
+            let reg = reg_lock.write().unwrap();
+            reg.dynamic_cfg.write().unwrap().sgx_reputation_threshold = 0.1;
         }
 
         {
@@ -503,7 +652,7 @@ mod tests {
         // Reset registry to clean state so subsequent serial tests start fresh.
         {
             let mut reg = reg_lock.write().unwrap();
-            *reg = crate::registry::ValidatorRegistry::new();
+            *reg = crate::registry::ValidatorRegistry::default();
         }
     }
 
@@ -512,8 +661,8 @@ mod tests {
     fn test_registry_mesh_quorum() {
         let reg_lock = crate::registry::get_registry();
         let mut reg = reg_lock.write().unwrap();
-        *reg = crate::registry::ValidatorRegistry::new();
-        reg.manifold_quorum_threshold = 2; // Needs 2
+        *reg = crate::registry::ValidatorRegistry::default();
+        reg.dynamic_cfg.write().unwrap().manifold_quorum_threshold = 2; // Needs 2
         
         let manifold_id = 99;
         let did1 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doJ", false);
@@ -583,10 +732,12 @@ mod tests {
         });
         
         let seed = [1u8; 32];
+        let dynamic_cfg = Arc::new(std::sync::RwLock::new(crate::config::DynamicConfig::default()));
         let mut courier = crate::courier::BlindCourierService::new(
             "did:peer:4:courier".to_string(),
             &seed,
             mock_rpc.clone(),
+            dynamic_cfg,
         ).unwrap();
         
         // Should not be suspended initially
@@ -616,9 +767,9 @@ mod tests {
 
         {
             let mut reg = reg_lock.write().unwrap();
-            *reg = crate::registry::ValidatorRegistry::new();
-            reg.epoch_length = 1000;
-            reg.publishing_window = 100;
+            *reg = crate::registry::ValidatorRegistry::default();
+            reg.static_cfg.epoch.epoch_length = 1000;
+            reg.static_cfg.epoch.publishing_window = 100;
             reg.current_block = 50; // Within window
             // Register mock validator AND map caller address → DID so ownership check passes.
             reg.add_mock_validator(mock_did.clone(), caller, [0x99; 32]);
@@ -670,5 +821,114 @@ mod tests {
         let res2 = execute_registry_call(caller, &Bytes::from(payload));
         assert!(res2.is_err());
         assert_eq!(res2.unwrap_err(), "Not within the epoch publishing window");
+    }
+
+    #[test]
+    #[serial]
+    fn test_execute_metalex_call() {
+        let reg_lock = crate::registry::get_registry();
+        {
+            let mut reg = reg_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::default();
+            reg.dynamic_cfg.write().unwrap().metalex_validator_count_threshold = 2;
+        }
+
+        let did_peer = "did:peer:4:sovereign_co";
+        let equity_token = "0xEquityTokenAddressMock";
+        let agent_dids = vec!["did:peer:4:alice".to_string(), "did:peer:4:bob".to_string()];
+        let agent_roles = vec!["director".to_string(), "signatory".to_string()];
+        let validator_signatures = vec![vec![1, 2, 3], vec![4, 5, 6]];
+
+        let encode_string = |s: &str| -> Vec<u8> {
+            let mut v = vec![0u8; 32];
+            v[31] = s.len() as u8;
+            v.extend_from_slice(s.as_bytes());
+            let pad = 32 - (s.len() % 32);
+            if pad < 32 {
+                v.extend(vec![0u8; pad]);
+            }
+            v
+        };
+
+        let encode_bytes = |b: &[u8]| -> Vec<u8> {
+            let mut v = vec![0u8; 32];
+            v[31] = b.len() as u8;
+            v.extend_from_slice(b);
+            let pad = 32 - (b.len() % 32);
+            if pad < 32 {
+                v.extend(vec![0u8; pad]);
+            }
+            v
+        };
+
+        let did_peer_enc = encode_string(did_peer);
+        let equity_token_enc = encode_string(equity_token);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&SELECTOR_REGISTER_OR_UPDATE_ORG);
+
+        let offset_did_peer = 160;
+        let offset_equity_token = offset_did_peer + did_peer_enc.len();
+        
+        let offset_agent_dids = offset_equity_token + equity_token_enc.len();
+        let item_alice_enc = encode_string(&agent_dids[0]);
+        let item_bob_enc = encode_string(&agent_dids[1]);
+        let agent_dids_array_size = 32 + 64 + item_alice_enc.len() + item_bob_enc.len();
+        let offset_agent_roles = offset_agent_dids + agent_dids_array_size;
+
+        let item_director_enc = encode_string(&agent_roles[0]);
+        let item_signatory_enc = encode_string(&agent_roles[1]);
+        let agent_roles_array_size = 32 + 64 + item_director_enc.len() + item_signatory_enc.len();
+        let offset_sigs = offset_agent_roles + agent_roles_array_size;
+
+        let mut head = vec![0u8; 160];
+        head[24..32].copy_from_slice(&(offset_did_peer as u64).to_be_bytes());
+        head[56..64].copy_from_slice(&(offset_equity_token as u64).to_be_bytes());
+        head[88..96].copy_from_slice(&(offset_agent_dids as u64).to_be_bytes());
+        head[120..128].copy_from_slice(&(offset_agent_roles as u64).to_be_bytes());
+        head[152..160].copy_from_slice(&(offset_sigs as u64).to_be_bytes());
+        payload.extend_from_slice(&head);
+
+        payload.extend_from_slice(&did_peer_enc);
+        payload.extend_from_slice(&equity_token_enc);
+
+        let mut agent_dids_head = vec![0u8; 96];
+        agent_dids_head[24..32].copy_from_slice(&2u64.to_be_bytes());
+        agent_dids_head[56..64].copy_from_slice(&64u64.to_be_bytes());
+        agent_dids_head[88..96].copy_from_slice(&((64 + item_alice_enc.len()) as u64).to_be_bytes());
+        payload.extend_from_slice(&agent_dids_head);
+        payload.extend_from_slice(&item_alice_enc);
+        payload.extend_from_slice(&item_bob_enc);
+
+        let mut agent_roles_head = vec![0u8; 96];
+        agent_roles_head[24..32].copy_from_slice(&2u64.to_be_bytes());
+        agent_roles_head[56..64].copy_from_slice(&64u64.to_be_bytes());
+        agent_roles_head[88..96].copy_from_slice(&((64 + item_director_enc.len()) as u64).to_be_bytes());
+        payload.extend_from_slice(&agent_roles_head);
+        payload.extend_from_slice(&item_director_enc);
+        payload.extend_from_slice(&item_signatory_enc);
+
+        let item_sig0_enc = encode_bytes(&validator_signatures[0]);
+        let item_sig1_enc = encode_bytes(&validator_signatures[1]);
+        let mut sigs_head = vec![0u8; 96];
+        sigs_head[24..32].copy_from_slice(&2u64.to_be_bytes());
+        sigs_head[56..64].copy_from_slice(&64u64.to_be_bytes());
+        sigs_head[88..96].copy_from_slice(&((64 + item_sig0_enc.len()) as u64).to_be_bytes());
+        payload.extend_from_slice(&sigs_head);
+        payload.extend_from_slice(&item_sig0_enc);
+        payload.extend_from_slice(&item_sig1_enc);
+
+        let caller = Address::repeat_byte(0xcc);
+        let res = execute_metalex_call(caller, &Bytes::from(payload));
+        assert!(res.is_ok(), "MetaLex call failed: {:?}", res.err());
+        let out = res.unwrap();
+        assert_eq!(out[31], 1);
+
+        let mgr_lock = crate::metalex::get_metalex_manager();
+        let mgr = mgr_lock.read().unwrap();
+        assert!(mgr.orgs.contains_key("did:peer:4:sovereign_co"));
+        let org = mgr.orgs.get("did:peer:4:sovereign_co").unwrap();
+        assert_eq!(org.equity_token, "0xEquityTokenAddressMock");
+        assert_eq!(org.agents.get("did:peer:4:alice").unwrap(), "director");
     }
 }

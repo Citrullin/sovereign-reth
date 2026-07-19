@@ -30,25 +30,24 @@ pub struct ValidatorRegistry {
     pub endorsements: HashMap<String, HashMap<String, f64>>,
     /// Global reputation mapping: DID -> Score
     pub reputation: HashMap<String, f64>,
-    /// Hardware enclave threshold (if 0.0, bypassed)
-    pub sgx_reputation_threshold: f64,
     /// Mapping of validator DID -> Set of Manifold IDs they are willing to route to.
     supported_manifolds: HashMap<String, HashSet<u64>>,
-    /// Threshold to enforce minimum required validators for organic manifold routing
-    pub manifold_quorum_threshold: usize,
-    /// Epoch length in blocks (default 30 days = ~`1_296_000` blocks at 2s)
-    pub epoch_length: u64,
-    /// Publishing window length in blocks (default ~10 min = 300 blocks at 2s)
-    pub publishing_window: u64,
     /// Current block number tracked by the consensus engine
     pub current_block: u64,
     /// Store KZG commitments submitted by validators: DID -> 48-byte commitment
     pub commitments: HashMap<String, [u8; 48]>,
+    /// Static configurations loaded at startup.
+    pub static_cfg: crate::config::StaticConfig,
+    /// Dynamic, hot-reloadable configurations.
+    pub dynamic_cfg: std::sync::Arc<std::sync::RwLock<crate::config::DynamicConfig>>,
 }
 
 impl Default for ValidatorRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            crate::config::StaticConfig::default(),
+            std::sync::Arc::new(std::sync::RwLock::new(crate::config::DynamicConfig::default())),
+        )
     }
 }
 
@@ -57,7 +56,10 @@ impl ValidatorRegistry {
     ///
     /// # Panics
     /// Panics if bootstrap genesis peer DID creation fails.
-    pub fn new() -> Self {
+    pub fn new(
+        static_cfg: crate::config::StaticConfig,
+        dynamic_cfg: std::sync::Arc<std::sync::RwLock<crate::config::DynamicConfig>>,
+    ) -> Self {
         let mut registry = Self {
             validators: HashMap::new(),
             peer_keys: HashMap::new(),
@@ -66,12 +68,10 @@ impl ValidatorRegistry {
             supported_manifolds: HashMap::new(),
             seeds: HashSet::new(),
             reputation: HashMap::new(),
-            sgx_reputation_threshold: 0.0, // Disabled by default
-            manifold_quorum_threshold: 500, // Organic routing threshold minimum 
-            epoch_length: 1_296_000,
-            publishing_window: 300,
             current_block: 0,
             commitments: HashMap::new(),
+            static_cfg,
+            dynamic_cfg,
         };
 
         // Bootstrap with genesis seeds
@@ -113,7 +113,7 @@ impl ValidatorRegistry {
             return Err("Caller does not own this DID");
         }
 
-        if self.current_block % self.epoch_length > self.publishing_window {
+        if self.current_block % self.static_cfg.epoch.epoch_length > self.static_cfg.epoch.publishing_window {
             return Err("Not within the epoch publishing window");
         }
 
@@ -224,9 +224,10 @@ impl ValidatorRegistry {
             if let Some(val_type) = self.validators.get(did) {
                 // If the enclave is suspected to be compromised and reputation threshold is set,
                 // verify that the SGX node also possesses sufficient social reputation.
-                if *val_type == ValidatorType::HardwareTEE && self.sgx_reputation_threshold > 0.0 {
+                let sgx_threshold = self.dynamic_cfg.read().unwrap().sgx_reputation_threshold;
+                if *val_type == ValidatorType::HardwareTEE && sgx_threshold > 0.0 {
                     let rep = self.reputation.get(did).copied().unwrap_or(0.0);
-                    if rep < self.sgx_reputation_threshold {
+                    if rep < sgx_threshold {
                         continue;
                     }
                 }
@@ -259,12 +260,13 @@ impl ValidatorRegistry {
             }
         }
         
-        if total_supporters < self.manifold_quorum_threshold {
+        let quorum_threshold = self.dynamic_cfg.read().unwrap().manifold_quorum_threshold;
+        if total_supporters < quorum_threshold {
             warn!(
                 did,
                 target_manifold_id,
                 total_supporters,
-                threshold = self.manifold_quorum_threshold,
+                threshold = quorum_threshold,
                 "Insufficient quorum — manifold route is not yet secure/active",
             );
         }
@@ -290,7 +292,8 @@ impl ValidatorRegistry {
         }
         
         // Enforce Quorum Threshold
-        if routable.len() < self.manifold_quorum_threshold {
+        let quorum_threshold = self.dynamic_cfg.read().unwrap().manifold_quorum_threshold;
+        if routable.len() < quorum_threshold {
             return HashSet::new(); // Route is disabled
         }
         
@@ -304,9 +307,9 @@ impl ValidatorRegistry {
             return;
         }
 
-        let d = 0.85; // Damping factor
+        let d = self.static_cfg.pagerank.damping_factor;
         let teleport_prob = 1.0 - d;
-        let iterations = 20;
+        let iterations = self.static_cfg.pagerank.max_iterations;
 
         // Collect all unique nodes in the graph
         let mut nodes = HashSet::new();
@@ -468,10 +471,10 @@ impl ValidatorRegistry {
         }
     }
 
-    /// Promotes social validators if their reputation exceeds the threshold (0.05).
     fn update_active_validators(&mut self) {
+        let promo_threshold = self.dynamic_cfg.read().unwrap().social_promotion_threshold;
         for (did, &rep) in &self.reputation {
-            if rep >= 0.05 && !self.validators.contains_key(did) {
+            if rep >= promo_threshold && !self.validators.contains_key(did) {
                 self.validators.insert(did.clone(), ValidatorType::VanillaSocial);
             }
         }
@@ -479,8 +482,8 @@ impl ValidatorRegistry {
 
     /// Applies monthly temporal decay: `R_i(j)` = (1 - gamma) * `R_i(j)` + `delta_R` * gamma
     pub fn apply_temporal_decay(&mut self) {
-        let gamma = 0.05;
-        let delta_r = 0.05;
+        let gamma = self.static_cfg.pagerank.temporal_decay_gamma;
+        let delta_r = self.static_cfg.pagerank.temporal_decay_delta_r;
         for rep in self.reputation.values_mut() {
             *rep = (1.0 - gamma) * (*rep) + delta_r * gamma;
         }
@@ -533,7 +536,25 @@ pub static VALIDATOR_REGISTRY: OnceLock<RwLock<ValidatorRegistry>> = OnceLock::n
 
 /// Returns a static reference to the shared thread-safe validator registry.
 pub fn get_registry() -> &'static RwLock<ValidatorRegistry> {
-    VALIDATOR_REGISTRY.get_or_init(|| RwLock::new(ValidatorRegistry::new()))
+    VALIDATOR_REGISTRY.get_or_init(|| {
+        RwLock::new(ValidatorRegistry::new(
+            crate::config::StaticConfig::default(),
+            std::sync::Arc::new(std::sync::RwLock::new(crate::config::DynamicConfig::default())),
+        ))
+    })
+}
+
+/// Initializes the global validator registry with custom configurations.
+///
+/// # Errors
+/// Returns an error if the registry has already been initialized.
+pub fn init_registry(
+    static_cfg: crate::config::StaticConfig,
+    dynamic_cfg: std::sync::Arc<std::sync::RwLock<crate::config::DynamicConfig>>,
+) -> Result<(), &'static str> {
+    VALIDATOR_REGISTRY
+        .set(RwLock::new(ValidatorRegistry::new(static_cfg, dynamic_cfg)))
+        .map_err(|_| "Global registry has already been initialized")
 }
 
 #[cfg(test)]
@@ -542,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_connectivity_decay() {
-        let mut registry = ValidatorRegistry::new();
+        let mut registry = ValidatorRegistry::default();
         registry.seeds.clear();
         registry.validators.clear();
         registry.endorsements.clear();
@@ -579,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_cartel_slashing_scenario() {
-        let mut registry = ValidatorRegistry::new();
+        let mut registry = ValidatorRegistry::default();
         registry.reputation.insert("did:peer:A".to_string(), 1.0);
         registry.reputation.insert("did:peer:B".to_string(), 1.0);
         registry.reputation.insert("did:peer:C".to_string(), 1.0);
@@ -610,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_epoch_rollover_slashing_scenario() {
-        let mut registry = ValidatorRegistry::new();
+        let mut registry = ValidatorRegistry::default();
         registry.reputation.insert("did:peer:A".to_string(), 1.0);
         registry.reputation.insert("did:peer:B".to_string(), 1.0);
 

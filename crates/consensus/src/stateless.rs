@@ -70,7 +70,7 @@ impl Database for WitnessDatabase {
 /// # Errors
 /// Returns an error if signatures are missing or the state diff is empty.
 pub fn validate_implicit_state_block(
-    _state_root: B256,
+    state_root: B256,
     state_diff: &[u8],
     signatures: &[Bytes],
 ) -> Result<B256, &'static str> {
@@ -84,8 +84,11 @@ pub fn validate_implicit_state_block(
         return Err("Empty state diff in implicit block");
     }
 
-    // Calculate a mock state root hash from diff
-    let new_root = B256::repeat_byte(state_diff[0]);
+    // Compute the actual state root transition by hashing the previous root with the diff
+    let mut preimage = Vec::with_capacity(32 + state_diff.len());
+    preimage.extend_from_slice(state_root.as_slice());
+    preimage.extend_from_slice(state_diff);
+    let new_root = alloy_primitives::keccak256(&preimage);
 
     Ok(new_root)
 }
@@ -118,7 +121,13 @@ mod tests {
         let state_diff = vec![0x99];
         let root = B256::repeat_byte(0xaa);
 
-        let res = validate_implicit_state_block(root, &state_diff, &signatures);
-        assert_eq!(res.unwrap(), B256::repeat_byte(0x99));
+        let res = validate_implicit_state_block(root, &state_diff, &signatures).unwrap();
+        
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(root.as_slice());
+        preimage.extend_from_slice(&state_diff);
+        let expected = alloy_primitives::keccak256(&preimage);
+
+        assert_eq!(res, expected);
     }
 }

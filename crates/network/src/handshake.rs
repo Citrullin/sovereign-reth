@@ -97,9 +97,29 @@ impl ZeroConfigMesh {
         creds: &sovereign_identity::zkp_auth::NfcCredentials,
         endpoint: &str,
     ) -> Result<(), &'static str> {
-        // 1. Verify credentials (mocked signature validation check)
-        if creds.dynamic_signature.is_empty() || creds.dynamic_signature == b"BAD_SIGNATURE" {
-            return Err("Invalid NFC signature credentials");
+        // 1. Verify credentials using peer's public key resolved from DID
+        let resolved = futures::executor::block_on(sovereign_identity::DidPeer4::resolve(did))
+            .map_err(|_| "Failed to resolve DID for signature verification")?;
+
+        match resolved.key_type {
+            sovereign_identity::KeyType::Ed25519 => {
+                use ed25519_dalek::{Verifier, Signature, VerifyingKey};
+                let sig = Signature::from_slice(&creds.dynamic_signature)
+                    .map_err(|_| "Invalid Ed25519 signature format")?;
+                let public_key = VerifyingKey::from_bytes(&resolved.public_key[0..32].try_into().map_err(|_| "Invalid Ed25519 public key length")?)
+                    .map_err(|_| "Invalid Ed25519 public key")?;
+                public_key.verify(&creds.challenge, &sig)
+                    .map_err(|_| "Ed25519 signature verification failed")?;
+            }
+            sovereign_identity::KeyType::Secp256k1 => {
+                use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+                let sig = Signature::from_slice(&creds.dynamic_signature)
+                    .map_err(|_| "Invalid Secp256k1 signature format")?;
+                let public_key = VerifyingKey::from_sec1_bytes(&resolved.public_key)
+                    .map_err(|_| "Invalid Secp256k1 public key")?;
+                public_key.verify(&creds.challenge, &sig)
+                    .map_err(|_| "Secp256k1 signature verification failed")?;
+            }
         }
 
         // 2. Configure Wireguard interface
@@ -146,24 +166,44 @@ mod tests {
 
     #[test]
     fn test_zero_config_nfc_handshake() {
+        use ed25519_dalek::{SigningKey, Signer};
+
         let mut mesh = ZeroConfigMesh::new("wg0");
+        let seed = [1u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        
+        let mut codec_bytes = vec![0xed, 0x01];
+        codec_bytes.extend_from_slice(&verifying_key.to_bytes());
+        let multibase_str = format!("z{}", bs58::encode(codec_bytes).into_string());
+
+        let keys = vec![did_peer::DIDPeerCreateKeys {
+            type_: Some(did_peer::DIDPeerKeyType::Ed25519),
+            purpose: did_peer::DIDPeerKeys::Verification,
+            public_key_multibase: Some(multibase_str),
+        }];
+        let (did, _) = did_peer::DIDPeer::create_peer_did(&keys, None).unwrap();
+
+        let challenge = vec![1, 2, 3];
+        let sig = signing_key.sign(&challenge).to_bytes().to_vec();
+
         let creds = sovereign_identity::zkp_auth::NfcCredentials {
             card_uid: vec![0x11, 0x22],
-            dynamic_signature: b"valid_nfc_sig".to_vec(),
-            challenge: vec![1, 2, 3],
+            dynamic_signature: sig.clone(),
+            challenge: challenge.clone(),
         };
         
-        let res = mesh.handle_nfc_handshake("did:peer:4:z6M123", &creds, "10.0.0.2:51820");
-        assert!(res.is_ok());
-        assert_eq!(mesh.peered_dids[0], "did:peer:4:z6M123");
+        let res = mesh.handle_nfc_handshake(&did, &creds, "10.0.0.2:51820");
+        res.unwrap();
+        assert_eq!(mesh.peered_dids[0], did);
 
         // Invalid signature test
         let bad_creds = sovereign_identity::zkp_auth::NfcCredentials {
             card_uid: vec![0x11, 0x22],
-            dynamic_signature: b"BAD_SIGNATURE".to_vec(),
-            challenge: vec![1, 2, 3],
+            dynamic_signature: b"BAD_SIGNATURE_BYTES_REPEATED_BYTE_000000000000000000000000000000".to_vec(),
+            challenge,
         };
-        let res_err = mesh.handle_nfc_handshake("did:peer:4:z6M123", &bad_creds, "10.0.0.2:51820");
+        let res_err = mesh.handle_nfc_handshake(&did, &bad_creds, "10.0.0.2:51820");
         assert!(res_err.is_err());
     }
 }

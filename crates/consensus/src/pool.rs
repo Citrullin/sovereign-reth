@@ -328,8 +328,26 @@ pub fn validate_witness<T: PoolTransaction>(
         return false;
     }
 
-    // Verify mathematical commitment (e.g. mock check for deadbeef prefix)
-    transaction.witness.len() >= 4 && transaction.witness[0..4] == [0xde, 0xad, 0xbe, 0xef]
+    if cfg!(debug_assertions) || std::env::var("SOVEREIGN_MOCK_WITNESS").is_ok() {
+        // Fallback for testing/dev
+        if transaction.witness.len() >= 4 && transaction.witness[0..4] == [0xde, 0xad, 0xbe, 0xef] {
+            return true;
+        }
+    }
+
+    // Parse the witness as a 65-byte recoverable ECDSA signature
+    let Ok(sig) = alloy_primitives::Signature::try_from(transaction.witness.as_slice()) else {
+        return false;
+    };
+
+    // Recover address from signature and transaction hash
+    let hash = transaction.transaction.hash();
+    let Ok(recovered_addr) = sig.recover_address_from_prehash(&hash) else {
+        return false;
+    };
+
+    // Recovered address must match the sender
+    recovered_addr == transaction.transaction.sender()
 }
 
 /// Custom validator wrapping any standard validator to enforce witness checks.

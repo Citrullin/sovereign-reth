@@ -14,5 +14,7 @@ pub mod bgp;
 pub mod precompile;
 pub mod slashing;
 pub mod parallel;
+pub mod subset_election;
+pub mod courier;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};

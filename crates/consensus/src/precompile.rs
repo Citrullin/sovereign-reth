@@ -14,7 +14,7 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
     }
 
     let _namespace = &input[0..32];
-    let _target_manifold_id = u64::from_be_bytes(input[32..40].try_into().unwrap());
+    let target_manifold_id = u64::from_be_bytes(input[32..40].try_into().unwrap());
     let intent_hash = &input[40..72];
     let _safe_address = Address::from_slice(&input[72..92]);
     let _amount = &input[92..124];
@@ -27,6 +27,14 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
     // In production, we also verify a storage proof of Gnosis Safe State Lock module.
     if ttl == 0 {
         return Err("State Lock TTL has expired or is invalid");
+    }
+
+    // Check Organic Routing Registry Quorum
+    let registry_lock = crate::registry::get_registry();
+    let registry = registry_lock.read().map_err(|_| "Failed to lock registry")?;
+    let routable_validators = registry.get_routable_validators(target_manifold_id);
+    if routable_validators.is_empty() {
+        return Err("No secure route to target manifold (Insufficient Quorum)");
     }
 
     match scheme {
@@ -66,6 +74,8 @@ pub const SELECTOR_PROPOSE: [u8; 4] = [0x78, 0x9e, 0xf2, 0x39];
 pub const SELECTOR_ENDORSE: [u8; 4] = [0xe3, 0x9f, 0xa2, 0x19];
 /// Selector for registering an SGX node.
 pub const SELECTOR_REGISTER_SGX: [u8; 4] = [0xfd, 0x92, 0xac, 0x81];
+/// Selector for registering a supported manifold route.
+pub const SELECTOR_REGISTER_MANIFOLD: [u8; 4] = [0xaa, 0xbb, 0xcc, 0xdd];
 
 /// Registry Precompile (`0xfe`) for managing node enrollment and TinyMeritRank.
 pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'static str> {
@@ -111,6 +121,14 @@ pub fn execute_registry_call(caller: Address, input: &Bytes) -> Result<Bytes, &'
             
             println!("DEBUG: registering SGX node");
             registry.register_sgx_node(candidate_did)?;
+        }
+        SELECTOR_REGISTER_MANIFOLD => {
+            let candidate_did = decode_abi_string(input, 4)?;
+            if input.len() < 68 {
+                return Err("Input too short for registerSupportedManifold id");
+            }
+            let target_manifold_id = u64::from_be_bytes(input[60..68].try_into().unwrap());
+            registry.register_supported_manifold(&candidate_did, target_manifold_id)?;
         }
         _ => return Err("Invalid registry selector"),
     }
@@ -181,6 +199,15 @@ mod tests {
 
     #[test]
     fn test_execute_cross_manifold_call() {
+        let reg_lock = crate::registry::get_registry();
+        {
+            let mut reg = reg_lock.write().unwrap();
+            reg.manifold_quorum_threshold = 0;
+            let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
+            reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
+            reg.register_supported_manifold(&mock_did, 42).unwrap();
+        }
+
         let namespace = [1u8; 32];
         let target_manifold_id = 42u64.to_be_bytes();
         let intent_hash = [7u8; 32];
@@ -207,7 +234,7 @@ mod tests {
         payload_secp.extend_from_slice(&secp_sig_bytes);
 
         let res = execute_cross_manifold_call(&Bytes::from(payload_secp));
-        assert!(res.is_ok());
+        assert!(res.is_ok(), "Secp256k1 failed: {:?}", res.err());
         let out = res.unwrap();
         assert_eq!(out[31], 1);
 
@@ -440,4 +467,106 @@ mod tests {
 
         println!("TEST DEBUG: finished successfully!");
     }
+
+    #[test]
+    fn test_manifold_routing_quorum() {
+        let reg_lock = crate::registry::get_registry();
+        let mut reg = reg_lock.write().unwrap();
+        
+        reg.manifold_quorum_threshold = 2; // Set small quorum for test
+        let manifold_id = 1337;
+        
+        // Setup 2 active validators using valid DIDs
+        let did1 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2do1", false);
+        let did2 = create_test_did("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2do2", false);
+        reg.propose_validator(Address::repeat_byte(0x99), did1.clone()).unwrap();
+        reg.propose_validator(Address::repeat_byte(0x99), did2.clone()).unwrap();
+        
+        // Register supported manifold for did1
+        reg.register_supported_manifold(&did1, manifold_id).unwrap();
+        let routable = reg.get_routable_validators(manifold_id);
+        assert!(routable.is_empty(), "Should be empty because quorum is 2 but only 1 registered");
+        
+        // Register supported manifold for did2
+        reg.register_supported_manifold(&did2, manifold_id).unwrap();
+        
+        // Populate peer keys to make them active_peers()
+        reg.register_sgx_node(did1.clone()).unwrap();
+        reg.register_sgx_node(did2.clone()).unwrap();
+        
+        let routable2 = reg.get_routable_validators(manifold_id);
+        assert_eq!(routable2.len(), 2, "Quorum met, both should be routable");
+    }
+
+    #[test]
+    fn test_snow_subset_election() {
+        use std::collections::HashSet;
+        let mut election = crate::subset_election::SnowSubsetElection::new(42);
+        
+        let mut validators = HashSet::new();
+        let addr1 = Address::repeat_byte(0x01);
+        let addr2 = Address::repeat_byte(0x02);
+        let addr3 = Address::repeat_byte(0x03);
+        validators.insert(addr1);
+        validators.insert(addr2);
+        validators.insert(addr3);
+        
+        election.trigger_election(&validators, 1, 2).unwrap();
+        assert_eq!(election.current_subset.len(), 2, "Should select exactly 2 out of 3 validators");
+        
+        // Check determinism for the same epoch
+        let mut election2 = crate::subset_election::SnowSubsetElection::new(42);
+        election2.trigger_election(&validators, 1, 2).unwrap();
+        assert_eq!(election.current_subset, election2.current_subset, "Election must be deterministic for the same epoch");
+        
+        // Trigger for a different epoch
+        let mut election3 = crate::subset_election::SnowSubsetElection::new(42);
+        election3.trigger_election(&validators, 2, 2).unwrap();
+        // Since it's a different epoch, the seed is different and the sorted order might be different (or it could overlap, but it validates deterministic code flow)
+        assert_eq!(election3.current_subset.len(), 2);
+    }
+
+    struct MockRpcClient {
+        balance: std::sync::Mutex<alloy_primitives::U256>,
+    }
+
+    impl crate::courier::RpcClient for MockRpcClient {
+        fn get_balance(&self, _address: Address) -> alloy_primitives::U256 {
+            *self.balance.lock().unwrap()
+        }
+    }
+
+    #[test]
+    fn test_paymaster_auto_suspension() {
+        use std::sync::Arc;
+        let mock_rpc = Arc::new(MockRpcClient {
+            balance: std::sync::Mutex::new(alloy_primitives::U256::from(10_000_000_000_000_000u64)), // 0.01 ETH
+        });
+        
+        let seed = [1u8; 32];
+        let mut courier = crate::courier::BlindCourierService::new(
+            "did:peer:4:courier".to_string(),
+            &seed,
+            mock_rpc.clone(),
+        );
+        
+        // Should not be suspended initially
+        assert!(!courier.check_funding_and_suspend());
+        assert!(!courier.is_suspended);
+        
+        // Deplete the balance
+        *mock_rpc.balance.lock().unwrap() = alloy_primitives::U256::from(1_000_000_000_000_000u64); // 0.001 ETH (< 0.005)
+        
+        // Should suspend
+        assert!(courier.check_funding_and_suspend());
+        assert!(courier.is_suspended);
+        
+        // Refill balance
+        *mock_rpc.balance.lock().unwrap() = alloy_primitives::U256::from(15_000_000_000_000_000u64);
+        
+        // Should resume
+        assert!(!courier.check_funding_and_suspend());
+        assert!(!courier.is_suspended);
+    }
 }
+

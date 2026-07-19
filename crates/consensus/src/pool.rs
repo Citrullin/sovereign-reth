@@ -28,6 +28,21 @@ pub struct FCFSOrdering<T> {
     _marker: std::marker::PhantomData<T>,
 }
 
+/// A standard ERC-7683 Cross-Chain Intent
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ERC7683Intent {
+    /// The target recipient address on the destination manifold.
+    pub target: alloy_primitives::Address,
+    /// The amount of assets to transfer.
+    pub amount: alloy_primitives::U256,
+    /// The asset/token address.
+    pub asset: alloy_primitives::Address,
+    /// The expiration deadline timestamp.
+    pub deadline: u64,
+    /// The target manifold ID.
+    pub target_manifold_id: u64,
+}
+
 /// A transaction bundled with its execution witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionWithWitness<T> {

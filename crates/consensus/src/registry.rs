@@ -29,6 +29,10 @@ pub struct ValidatorRegistry {
     reputation: HashMap<String, f64>,
     /// Minimum reputation required for HardwareTEE validators if enclave is suspected to be compromised.
     pub sgx_reputation_threshold: f64,
+    /// Mapping of validator DID -> Set of Manifold IDs they are willing to route to.
+    supported_manifolds: HashMap<String, HashSet<u64>>,
+    /// Configurable minimum validators required to activate a manifold route.
+    pub manifold_quorum_threshold: usize,
 }
 
 impl Default for ValidatorRegistry {
@@ -48,6 +52,8 @@ impl ValidatorRegistry {
             endorsements: HashMap::new(),
             reputation: HashMap::new(),
             sgx_reputation_threshold: 0.0,
+            supported_manifolds: HashMap::new(),
+            manifold_quorum_threshold: 500, // Default configurable threshold
         };
 
         // Bootstrap with genesis seeds
@@ -165,6 +171,57 @@ impl ValidatorRegistry {
             }
         }
         active
+    }
+
+    /// Registers a manifold that the validator is willing to route to.
+    pub fn register_supported_manifold(&mut self, did: &str, target_manifold_id: u64) -> Result<(), &'static str> {
+        if !self.validators.contains_key(did) {
+            return Err("Only registered validators can declare routing support");
+        }
+        
+        let entry = self.supported_manifolds.entry(did.to_string()).or_insert_with(HashSet::new);
+        entry.insert(target_manifold_id);
+        
+        // Operator Warning if quorum is not met
+        let mut total_supporters = 0;
+        for manifolds in self.supported_manifolds.values() {
+            if manifolds.contains(&target_manifold_id) {
+                total_supporters += 1;
+            }
+        }
+        
+        if total_supporters < self.manifold_quorum_threshold {
+            // Log a warning so the operator knows the route is not yet secure/active
+            eprintln!("WARN: [INSUFFICIENT QUORUM] Validator {} registered for manifold {}, but total ({}) is below threshold ({}). Route is not yet secure/active.",
+                did, target_manifold_id, total_supporters, self.manifold_quorum_threshold);
+        }
+        
+        Ok(())
+    }
+
+    /// Returns the active EVM addresses of validators that route to a specific manifold.
+    /// Only returns a route if the total quorum threshold is met.
+    pub fn get_routable_validators(&self, target_manifold_id: u64) -> HashSet<Address> {
+        let mut routable = HashSet::new();
+        let active = self.active_peers();
+        
+        // Active returns peer_key -> Address. We need to iterate over Address -> DID -> supported
+        for addr in active.values() {
+            if let Some(did) = self.get_did_by_address(addr) {
+                if let Some(manifolds) = self.supported_manifolds.get(&did) {
+                    if manifolds.contains(&target_manifold_id) {
+                        routable.insert(*addr);
+                    }
+                }
+            }
+        }
+        
+        // Enforce Quorum Threshold
+        if routable.len() < self.manifold_quorum_threshold {
+            return HashSet::new(); // Route is disabled
+        }
+        
+        routable
     }
 
     /// Computes TinyMeritRank reputation using Personalized PageRank.
@@ -286,6 +343,14 @@ impl ValidatorRegistry {
     #[cfg(test)]
     pub fn set_reputation(&mut self, did: String, value: f64) {
         self.reputation.insert(did, value);
+    }
+
+    /// Adds a mock validator directly (used in testing).
+    #[cfg(test)]
+    pub fn add_mock_validator(&mut self, did: String, addr: Address, peer_key: [u8; 32]) {
+        self.validators.insert(did.clone(), ValidatorType::VanillaSocial);
+        self.peer_keys.insert(did.clone(), peer_key);
+        self.address_to_did.insert(addr, did);
     }
 }
 

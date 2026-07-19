@@ -10819,6 +10819,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "boringtun",
+ "did-peer",
  "ed25519-dalek 3.0.0",
  "eyre",
  "futures",
@@ -10836,6 +10837,8 @@ dependencies = [
  "revm-database-interface",
  "revm-primitives",
  "revm-state",
+ "sovereign-attestation",
+ "sovereign-identity",
  "tokio",
  "tracing",
 ]

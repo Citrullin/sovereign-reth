@@ -70,6 +70,24 @@ impl BgpRouter {
         self.tunnels.insert(peer_public_key, tunnel);
     }
 
+    /// Syncs the WireGuard tunnels dynamically from the validator registry.
+    pub fn sync_peers_from_registry(&mut self) {
+        let registry_lock = crate::registry::get_registry();
+        let registry = match registry_lock.read() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let active_peers = registry.active_peers();
+        self.tunnels.retain(|key, _| active_peers.contains_key(key));
+
+        for &peer_key in active_peers.keys() {
+            if !self.tunnels.contains_key(&peer_key) {
+                self.register_peer(peer_key);
+            }
+        }
+    }
+
     /// Processes an incoming packet for a specific peer tunnel.
     pub fn handle_packet(&mut self, peer_public_key: &[u8; 32], packet: &[u8], out_buf: &mut [u8]) -> Result<Vec<u8>, String> {
         let tunnel = self.tunnels.get_mut(peer_public_key)

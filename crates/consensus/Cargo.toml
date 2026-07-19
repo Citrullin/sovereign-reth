@@ -29,5 +29,8 @@ nmt-rs = { workspace = true }
 boringtun = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
+sovereign-attestation = { path = "../attestation" }
+sovereign-identity = { path = "../identity" }
+did-peer = { workspace = true }
 
 

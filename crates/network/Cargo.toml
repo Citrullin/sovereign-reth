@@ -10,4 +10,8 @@ k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 boringtun = { workspace = true }
 alloy-primitives = { workspace = true }
+sovereign-consensus = { workspace = true }
+sovereign-identity = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 

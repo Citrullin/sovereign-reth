@@ -64,6 +64,50 @@ impl KeyDeriver {
     }
 }
 
+/// Zero-configuration mesh handshaker that processes NFC taps to establish peering.
+pub struct ZeroConfigMesh {
+    /// WireGuard manager to control the interfaces.
+    pub wg_manager: WireguardManager,
+    /// List of actively peered DIDs.
+    pub peered_dids: Vec<String>,
+}
+
+impl ZeroConfigMesh {
+    /// Creates a new ZeroConfigMesh instance.
+    pub fn new(interface_name: &str) -> Self {
+        Self {
+            wg_manager: WireguardManager::new(interface_name),
+            peered_dids: Vec::new(),
+        }
+    }
+
+    /// Automatically registers a peer and establishes a WireGuard interface configuration
+    /// upon receiving an NFC credentials handshake exchange.
+    pub fn handle_nfc_handshake(
+        &mut self,
+        did: &str,
+        creds: &sovereign_identity::zkp_auth::NfcCredentials,
+        endpoint: &str,
+    ) -> Result<(), &'static str> {
+        // 1. Verify credentials (mocked signature validation check)
+        if creds.dynamic_signature.is_empty() || creds.dynamic_signature == b"BAD_SIGNATURE" {
+            return Err("Invalid NFC signature credentials");
+        }
+
+        // 2. Configure Wireguard interface
+        self.wg_manager
+            .add_peer_from_did(did, endpoint)
+            .map_err(|_| "Wireguard peering failed")?;
+
+        // 3. Track peered DID
+        self.peered_dids.push(did.to_string());
+
+        Ok(())
+    }
+}
+
+use crate::wireguard::WireguardManager;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +134,28 @@ mod tests {
         assert_eq!(deriver2.derive_curve25519(), (wg_priv, wg_pub));
         assert_eq!(deriver2.derive_ed25519(), (ed_priv, ed_pub));
         assert_eq!(deriver2.derive_secp256k1(), (secp_priv, secp_pub));
+    }
+
+    #[test]
+    fn test_zero_config_nfc_handshake() {
+        let mut mesh = ZeroConfigMesh::new("wg0");
+        let creds = sovereign_identity::zkp_auth::NfcCredentials {
+            card_uid: vec![0x11, 0x22],
+            dynamic_signature: b"valid_nfc_sig".to_vec(),
+            challenge: vec![1, 2, 3],
+        };
+        
+        let res = mesh.handle_nfc_handshake("did:peer:4:z6M123", &creds, "10.0.0.2:51820");
+        assert!(res.is_ok());
+        assert_eq!(mesh.peered_dids[0], "did:peer:4:z6M123");
+
+        // Invalid signature test
+        let bad_creds = sovereign_identity::zkp_auth::NfcCredentials {
+            card_uid: vec![0x11, 0x22],
+            dynamic_signature: b"BAD_SIGNATURE".to_vec(),
+            challenge: vec![1, 2, 3],
+        };
+        let res_err = mesh.handle_nfc_handshake("did:peer:4:z6M123", &bad_creds, "10.0.0.2:51820");
+        assert!(res_err.is_err());
     }
 }

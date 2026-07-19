@@ -33,5 +33,6 @@ sovereign-attestation = { path = "../attestation" }
 sovereign-identity = { path = "../identity" }
 did-peer = { workspace = true }
 c-kzg = "2.1.8"
+serde = { workspace = true }
 
 

@@ -10838,6 +10838,7 @@ dependencies = [
  "revm-database-interface",
  "revm-primitives",
  "revm-state",
+ "serde",
  "sovereign-attestation",
  "sovereign-identity",
  "tokio",
@@ -10865,6 +10866,10 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "k256 0.14.0",
  "reed-solomon-erasure",
+ "serde",
+ "serde_json",
+ "sovereign-consensus",
+ "sovereign-identity",
 ]
 
 [[package]]

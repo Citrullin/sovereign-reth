@@ -247,4 +247,57 @@ mod tests {
         assert_ne!(commitment, alloy_primitives::B256::ZERO);
     }
 
+    #[test]
+    fn test_integration_nfc_namespace_metalex() {
+        use sovereign_network::handshake::ZeroConfigMesh;
+        use sovereign_identity::zkp_auth::NfcCredentials;
+        use sovereign_identity::namespace::NamespaceRegistry;
+        use sovereign_consensus::metalex::{BorgOrganization, RealityAudit, MetalexManager};
+        use sovereign_network::xroad::{XRoadRelay, XRoadRequestHeader};
+        use std::collections::HashMap;
+
+        // 1. Peer Node A and Node B via simulated NFC tap
+        let mut mesh = ZeroConfigMesh::new("wg0");
+        let creds = NfcCredentials {
+            card_uid: vec![0x99, 0x88],
+            dynamic_signature: b"valid_nfc_sig_token".to_vec(),
+            challenge: vec![0, 0, 1],
+        };
+        let node_a_did = "did:peer:4:node_a";
+        assert!(mesh.handle_nfc_handshake(node_a_did, &creds, "192.168.1.100:51820").is_ok());
+
+        // 2. Resolve a namespace for Node A
+        let mut ns_registry = NamespaceRegistry::new();
+        assert!(ns_registry.register("nodea.sovereign".into(), node_a_did.into(), 10.0, 0));
+
+        // 3. Register Node A's MetaLex organization contract with a Reality Audit
+        let mut metalex_manager = MetalexManager::new();
+        let mut agents = HashMap::new();
+        agents.insert(node_a_did.to_string(), "director".to_string());
+        
+        let org = BorgOrganization {
+            did_peer: node_a_did.to_string(),
+            equity_token: "0xEquityAddressNodeA".to_string(),
+            agents,
+            is_active: true,
+        };
+        let audit = RealityAudit {
+            epoch: 1,
+            validator_signatures: vec![vec![1, 2], vec![3, 4]], // threshold met
+        };
+        assert!(metalex_manager.register_or_update_org(org, &audit, 2).is_ok());
+
+        // 4. Query organization status optionally via X-Road
+        let relay = XRoadRelay::new(metalex_manager);
+        let header = XRoadRequestHeader {
+            client: "regulator".to_string(),
+            service: "verifyOrg".to_string(),
+            id: "tx-777".to_string(),
+            protocol_version: "4.0".to_string(),
+        };
+        let response = relay.query_organization_state(node_a_did, &header).unwrap();
+        assert!(response.contains("0xEquityAddressNodeA"));
+        assert!(response.contains("signed:did:peer:4:did:peer:4:node_a"));
+    }
+
 }
